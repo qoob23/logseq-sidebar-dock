@@ -1,83 +1,42 @@
-/** Plugin entry: settings schema, host-echo wiring, dock lifecycle. */
+/** Plugin entry: settings schema, model registration, host-echo wiring, dock lifecycle. */
 
 import '@logseq/libs'
 
-import { Dock, reclaimModel } from './dock'
-import { getInstalledPluginIds } from './logseq-types'
-import {
-  DOCK_MODES,
-  type DockMode,
-  NO_VIEW,
-  SPLIT_MAX,
-  SPLIT_MIN,
-  SettingsStore,
-  settingsDiffer,
-} from './settings'
+import { Dock, MODELS, type ModelEvent, eventData, eventValue } from './dock'
+import { SettingsStore, settingsDiffer } from './settings'
 
 function main(): void {
   const pluginId = logseq.baseInfo.id
   const store = new SettingsStore(logseq.settings)
 
   /**
-   * (Re)publish the settings schema. The plugin list is only complete once every other plugin has
-   * registered, which races our own startup — so this re-runs on host plugin-registry events. Every
-   * `default` is the CURRENT effective value, so re-publishing can never reset a selection, and the
-   * current selections stay in `enumChoices` even if their plugin went away.
+   * (Re)publish the settings schema.
+   *
+   * Three flat keys, all of them strings: the layout model is far too structured for
+   * `useSettingsSchema` (which has no array or nested-object input), so the whole configuration lives
+   * in `layouts` as canonical JSON and the dock's own edit mode is the editor. This panel is the
+   * escape hatch — for reading the JSON, copying it between graphs, or fixing something the UI cannot.
+   *
+   * Every `default` is the CURRENT effective value, so re-publishing can never reset a setting. It
+   * re-runs on host plugin-registry events because the schema is published once per session otherwise
+   * and would go on showing the values our own startup happened to see.
    */
   const applySchema = (): void => {
     const settings = store.current()
-    const choices = [
-      ...new Set([NO_VIEW, ...getInstalledPluginIds(pluginId), settings.viewTop, settings.viewBottom]),
-    ]
 
     logseq.useSettingsSchema([
       {
-        key: 'mode',
-        type: 'enum',
-        default: settings.mode,
-        title: 'Sidebar face',
-        description: 'Which face the sidebar shows. The Nav/Views control at the top of the sidebar sets this too.',
-        enumChoices: [...DOCK_MODES],
-        enumPicker: 'radio',
-      },
-      {
-        key: 'viewTop',
-        type: 'enum',
-        default: settings.viewTop,
-        title: 'Top view',
-        description: "Plugin whose main UI is docked in the dock's upper slot.",
-        enumChoices: choices,
-        enumPicker: 'select',
-      },
-      {
-        key: 'viewBottom',
-        type: 'enum',
-        default: settings.viewBottom,
-        title: 'Bottom view',
-        description: "Plugin whose main UI is docked in the dock's lower slot.",
-        enumChoices: choices,
-        enumPicker: 'select',
-      },
-      {
-        key: 'macroTop',
+        key: 'layouts',
         type: 'string',
-        default: settings.macroTop,
-        title: 'Top macro',
+        default: settings.layouts,
+        title: 'Layouts (raw JSON)',
         description:
-          'Renderer macro to show in the upper slot, e.g. `{{renderer :pomodoro-timer}}` (the bare ' +
-          '`:pomodoro-timer` works too). OVERRIDES "Top view" while it is set. Macros that only ' +
-          'render are supported; ones that write back to their block are not, as there is no block. ' +
-          'The same macro in both slots only works if its plugin keys its UI by slot.',
-      },
-      {
-        key: 'macroBottom',
-        type: 'string',
-        default: settings.macroBottom,
-        title: 'Bottom macro',
-        description:
-          'Renderer macro to show in the lower slot, e.g. `{{renderer :pomodoro-timer}}`. OVERRIDES ' +
-          '"Bottom view" while it is set. Same limitations: render-only macros, no block writes, and ' +
-          'the same macro in both slots only works if its plugin keys its UI by slot.',
+          'Canonical JSON of every tab, slot and weight. **Edit this from the sidebar instead** — the ' +
+          'gear in the dock\'s tab strip adds tabs and slots, picks views and renames things, and the ' +
+          'divider between slots is draggable. Kept here to be read, copied between graphs or repaired ' +
+          'by hand. While the text does not parse, the dock keeps showing the last version that did ' +
+          'and refuses every edit, so a typo cannot cost you the configuration.',
+        inputAs: 'textarea',
       },
       {
         key: 'adoptPoke',
@@ -90,11 +49,13 @@ function main(): void {
           'plugin into rendering its main UI, at most once every few seconds per plugin.',
       },
       {
-        key: 'splitPct',
-        type: 'number',
-        default: settings.splitPct,
-        title: 'Divider position (%)',
-        description: `Share of the dock given to the top view (${SPLIT_MIN}–${SPLIT_MAX}). Also set by dragging the divider.`,
+        key: 'activeTab',
+        type: 'string',
+        default: settings.activeTab,
+        title: 'Active tab',
+        description:
+          '`nav` for the stock navigation, or a layout id. Set by clicking a tab at the top of the ' +
+          'sidebar; a value naming no layout falls back to the navigation.',
       },
     ])
   }
@@ -104,35 +65,53 @@ function main(): void {
   const dock = new Dock(pluginId, store, applySchema)
 
   /**
-   * Flip the sidebar face. The override repaints immediately; `updateSettings` only catches the
-   * persisted value up ~0.5–1s later, and its echo then agrees with the override and drops it.
+   * Every control the dock builds carries its target in `data-*` and reaches us through the host's own
+   * `setupInjectedUI` delegation, which hands the model `{ type, value, id, className, dataset }` and
+   * NO element reference (`transformableEvent`, `libs/src/helpers.ts`). Hence one model per action with
+   * the slot or layout id in its dataset, rather than one pre-registered model name per slot — with
+   * slots created at runtime the latter is not expressible.
+   *
+   * Registered BEFORE the container is injected: the delegation resolves `data-on-<event>` against
+   * these names at event time, but a click on a freshly injected control must not find nothing.
    */
-  const setMode = (mode: DockMode): void => {
-    if (store.current().mode === mode) return
-    store.override({ mode })
-    dock.refreshStyle()
-    logseq.updateSettings({ mode })
-    // Revealing the views: re-assert so a stale placeholder (missing-view watch expired, or the plugin
-    // showed up without a lifecycle event) heals on the flip instead of staying wrong until reload.
-    if (mode === 'views') void dock.assert()
-  }
-
-  // Registered BEFORE the container is injected: `provideUI`'s delegation resolves `data-on-click`
-  // against this model.
   logseq.provideModel({
-    sdockShowNav: () => {
-      setMode('nav')
-    },
-    sdockShowViews: () => {
-      setMode('views')
+    [MODELS.selectTab]: (e: ModelEvent) => {
+      dock.selectTab(eventData(e, 'tab'))
     },
     // Explicit user intent to take an evicted embed back — the only re-mount the protocol allows
     // after a provider moved the view to another surface.
-    [reclaimModel('top')]: () => {
-      dock.reclaim('top')
+    [MODELS.reclaim]: (e: ModelEvent) => {
+      dock.reclaim(eventData(e, 'slotId'))
     },
-    [reclaimModel('bottom')]: () => {
-      dock.reclaim('bottom')
+    [MODELS.toggleEdit]: () => {
+      dock.toggleEdit()
+    },
+    [MODELS.addLayout]: () => {
+      dock.addLayout()
+    },
+    [MODELS.removeLayout]: (e: ModelEvent) => {
+      dock.removeLayout(eventData(e, 'layoutId'))
+    },
+    [MODELS.renameLayout]: (e: ModelEvent) => {
+      dock.renameLayout(eventData(e, 'layoutId'), eventValue(e))
+    },
+    [MODELS.toggleAxis]: (e: ModelEvent) => {
+      dock.toggleAxis(eventData(e, 'layoutId'))
+    },
+    [MODELS.addSlot]: (e: ModelEvent) => {
+      dock.addSlot(eventData(e, 'layoutId'))
+    },
+    [MODELS.removeSlot]: (e: ModelEvent) => {
+      dock.removeSlot(eventData(e, 'slotId'))
+    },
+    [MODELS.moveSlot]: (e: ModelEvent) => {
+      dock.moveSlot(eventData(e, 'slotId'), eventData(e, 'dir'))
+    },
+    [MODELS.pickSource]: (e: ModelEvent) => {
+      dock.pickSource(eventData(e, 'slotId'), eventValue(e))
+    },
+    [MODELS.setMacro]: (e: ModelEvent) => {
+      dock.setMacro(eventData(e, 'slotId'), eventValue(e))
     },
   })
 

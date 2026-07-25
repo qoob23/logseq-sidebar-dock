@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { slotElementId } from '../embed'
 import { MACRO_HOOK_TYPE, buildMacroHookPayload, macroSlotDomId, parseMacroSpec } from '../macro'
 
 describe('parseMacroSpec', () => {
@@ -43,24 +44,30 @@ describe('parseMacroSpec', () => {
 
 describe('macroSlotDomId', () => {
   it('builds a stable id per slot, so a re-emitted hook updates in place', () => {
-    expect(macroSlotDomId('logseq-sidebar-dock', 'top')).toBe('logseq-sidebar-dock--macro-top')
-    expect(macroSlotDomId('logseq-sidebar-dock', 'bottom')).toBe('logseq-sidebar-dock--macro-bottom')
+    // Stable across config edits because it is built from the slot's own id, never its position: a
+    // second injected element would otherwise stack up beside the first on every re-emission.
+    expect(macroSlotDomId('logseq-sidebar-dock', 's_aaaaaa')).toBe('logseq-sidebar-dock--macro-s_aaaaaa')
+    expect(macroSlotDomId('logseq-sidebar-dock', 's_bbbbbb')).toBe('logseq-sidebar-dock--macro-s_bbbbbb')
   })
 
   it('stays a bare CSS ident for a well-formed plugin id', () => {
-    expect(macroSlotDomId('a', 'top')).toMatch(/^[a-zA-Z][\w-]*$/)
+    expect(macroSlotDomId('a', 's_aaaaaa')).toMatch(/^[a-zA-Z][\w-]*$/)
   })
 
-  it('never collides with the embed slot ids', () => {
-    expect(macroSlotDomId('dock', 'top')).not.toBe('dock--slot-top')
+  it('never collides with the embed slot element id of the same slot', () => {
+    expect(macroSlotDomId('dock', 's_aaaaaa')).not.toBe(slotElementId('dock', 's_aaaaaa'))
+  })
+
+  it('gives distinct slots distinct wrappers', () => {
+    expect(macroSlotDomId('dock', 's_111111')).not.toBe(macroSlotDomId('dock', 's_222222'))
   })
 })
 
 describe('buildMacroHookPayload', () => {
   it('mirrors the payload the host emits for a real renderer macro', () => {
-    expect(buildMacroHookPayload('dock--macro-top', [':pomodoro', '25'])).toEqual({
+    expect(buildMacroHookPayload('dock--macro-s_aaaaaa', [':pomodoro', '25'])).toEqual({
       type: 'macro-renderer-slotted',
-      slot: 'dock--macro-top',
+      slot: 'dock--macro-s_aaaaaa',
       payload: { name: 'renderer', arguments: [':pomodoro', '25'], uuid: '' },
     })
   })
@@ -69,7 +76,7 @@ describe('buildMacroHookPayload', () => {
     expect(MACRO_HOOK_TYPE).toBe('macro-renderer-slotted')
   })
 
-  it('carries an empty uuid: there is no block behind our macro (documented v1 limitation)', () => {
-    expect(buildMacroHookPayload('dock--macro-top', [':x']).payload.uuid).toBe('')
+  it('carries an empty uuid: there is no block behind our macro (documented limitation)', () => {
+    expect(buildMacroHookPayload('dock--macro-s_aaaaaa', [':x']).payload.uuid).toBe('')
   })
 })

@@ -4,27 +4,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`logseq-sidebar-dock` — a **Logseq** plugin that gives the **LEFT sidebar** two faces, switched by a
-segmented **Nav / Views** control injected at the top of the sidebar: the stock navigation, or a **dock**
-filling the whole sidebar with **two user-selectable plugin views** and a **user-adjustable divider between
-them**. Plain **TypeScript**. Target is the **0.10.x Markdown/file graph**, NOT the DB version.
+`logseq-sidebar-dock` — a **Logseq** plugin that gives the **LEFT sidebar** any number of faces, switched
+by a tab strip injected at the top of the sidebar: **`Nav`** (always present — the stock navigation) plus
+one tab per **user-defined layout**, each filling the sidebar with **any number of slots** holding plugin
+views or renderer macros, separated by **user-adjustable dividers**. Layouts are configured **from the
+dock's own UI** (see `docs/layout-config.md`). Plain **TypeScript**. Target is the **0.10.x
+Markdown/file graph**, NOT the DB version.
 
 ## Source layout (implemented)
 
-- `src/main.ts` — entry: settings schema (re-published on plugin-registry events), `provideModel`
-  handlers for the tab and Reclaim buttons, echo wiring, `beforeunload`.
-- `src/dock.ts` — every host seam: `provideUI` injection + re-assertion, divider drag, drag
-  passthrough, slot mounting (per-slot spec: macro conjuring, or embed protocol → main-UI adoption →
-  placeholder; poke-then-adopt for lazy main UIs), host-document cleanup handle.
+- `src/config.ts` — **pure** central model (`docs/layout-config.md`): layout/slot types, id generation,
+  normalization, canonical serialization, parse-failure discrimination, slot resolution, and all eleven
+  edit operations (add/remove/rename layout, add/remove/move slot, set source…) as pure config→config
+  functions whose structural sharing is what keeps a surviving slot's id stable.
+- `src/main.ts` — entry: settings schema (re-published on plugin-registry events), the `provideModel`
+  handlers for every dock control, echo wiring, `beforeunload`.
+- `src/dock.ts` — every host seam: `provideUI` injection + re-assertion, host-realm reconciliation of
+  tabs/layouts/slots/dividers keyed by id, divider drag, drag passthrough, edit-mode controls, slot
+  mounting (per-slot spec: macro conjuring, or embed protocol → main-UI adoption → placeholder;
+  poke-then-adopt for lazy main UIs), host-document cleanup handle.
 - `src/embed.ts` — **pure** Embed Protocol v1 host logic (see `docs/embed-protocol.md`): payloads,
   slot ids, wipe-vs-eviction discriminator, strategy cache, "is this main UI empty?" predicate.
 - `src/macro.ts` — **pure** macro-slot logic: `{{renderer …}}` spec parsing, wrapper slot ids, the
   `macro-renderer-slotted` hook payload (emitted host-side via `LSPluginCore.hookApp`, mirroring the
   host's own `hook-ui-slot`).
-- `src/styles.ts` — **pure** builder for the whole keyed `provideStyle` sheet: mode, slot layout,
-  segmented control, hosted-view `!important` overrides.
-- `src/settings.ts` / `src/divider.ts` — **pure** settings normalization + override store, and divider
-  geometry. `src/logseq-types.ts` — typed model of the untyped host surfaces.
+- `src/styles.ts` — **pure** builder for the whole keyed `provideStyle` sheet: per-layout visibility and
+  axis, per-slot weights, tab strip, edit chrome, hosted-view `!important` overrides. Also the single
+  definition of the strings most likely to drift — `DOCK_KEY`, `dockContainerId`, the `sdock-dragging`
+  /`sdock-editing`/`sdock-slot-controls` state classes, `slotWeightVar`, `sheetMarker`. The structural
+  `sdock-*` class names are still spelled independently on both sides; **any** such divergence
+  typechecks, lints and tests clean and fails only in a live Logseq, so share a new one rather than
+  adding a second literal.
+- `src/settings.ts` / `src/divider.ts` — **pure** settings store (three flat keys; base + override layer
+  masking the host's echo lag) and weight-based divider geometry.
+  `src/logseq-types.ts` — typed model of the untyped host surfaces.
 
 Everything pure is unit-tested in `src/__tests__/`; the host seams need a live Logseq.
 

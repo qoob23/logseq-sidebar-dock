@@ -13,7 +13,6 @@ import {
   droppedByLifecycle,
   embedModelPath,
   embedOwnerSelector,
-  escapeAttribute,
   hasMeaningfulContent,
   nextStrategyAction,
   probeBudgetMs,
@@ -23,10 +22,17 @@ import {
 } from '../embed'
 
 describe('protocol addressing', () => {
-  it('builds stable slot ids that are valid CSS idents', () => {
-    expect(slotElementId('logseq-sidebar-dock', 'top')).toBe('logseq-sidebar-dock--slot-top')
-    expect(slotElementId('logseq-sidebar-dock', 'bottom')).toBe('logseq-sidebar-dock--slot-bottom')
-    expect(slotElementId('a', 'top')).toMatch(/^[a-zA-Z][\w-]*$/)
+  it('builds stable slot element ids that are valid CSS idents', () => {
+    expect(slotElementId('logseq-sidebar-dock', 's_aaaaaa')).toBe('logseq-sidebar-dock--slot-s_aaaaaa')
+    expect(slotElementId('logseq-sidebar-dock', 's_bbbbbb')).toBe('logseq-sidebar-dock--slot-s_bbbbbb')
+    expect(slotElementId('a', 's_aaaaaa')).toMatch(/^[a-zA-Z][\w-]*$/)
+  })
+
+  it('treats the slot id as an opaque token, so it survives reordering', () => {
+    // Slot-element identity is the wipe-vs-eviction discriminator (host rule 4): nothing here may
+    // parse or order the id, and two different slots must never share an element id.
+    expect(slotElementId('dock', 's_111111')).not.toBe(slotElementId('dock', 's_222222'))
+    expect(slotElementId('dock', 's_111111')).toBe(slotElementId('dock', 's_111111'))
   })
 
   it('addresses the provider models exactly as invokeExternalPlugin expects', () => {
@@ -34,9 +40,9 @@ describe('protocol addressing', () => {
     expect(embedModelPath('synapses', 'embedUnmount')).toBe('synapses.models.embedUnmount')
   })
 
-  it('builds a v1 payload carrying the slot id and our own id as origin', () => {
-    expect(buildEmbedPayload('logseq-sidebar-dock', 'logseq-sidebar-dock--slot-top')).toEqual({
-      slot: 'logseq-sidebar-dock--slot-top',
+  it('builds a v1 payload carrying the slot element id and our own id as origin', () => {
+    expect(buildEmbedPayload('logseq-sidebar-dock', 'logseq-sidebar-dock--slot-s_aaaaaa')).toEqual({
+      slot: 'logseq-sidebar-dock--slot-s_aaaaaa',
       origin: 'logseq-sidebar-dock',
       protocolVersion: PROTOCOL_VERSION,
     })
@@ -47,11 +53,6 @@ describe('protocol addressing', () => {
     expect(embedOwnerSelector('synapses')).toBe(`[${EMBED_OWNER_ATTR}="synapses"]`)
     expect(embedOwnerSelector('we"ird')).toBe(`[${EMBED_OWNER_ATTR}="we\\"ird"]`)
     expect(embedOwnerSelector('back\\slash')).toBe(`[${EMBED_OWNER_ATTR}="back\\\\slash"]`)
-  })
-
-  it('escapes attribute values interpolated into the injected template', () => {
-    expect(escapeAttribute('a"b&c<d>')).toBe('a&quot;b&amp;c&lt;d&gt;')
-    expect(escapeAttribute('logseq-sidebar-dock')).toBe('logseq-sidebar-dock')
   })
 })
 
@@ -120,8 +121,7 @@ describe('probeDelays', () => {
   it('re-invokes several times inside the budget instead of polling a single call', () => {
     // The cold-boot race is the point: one invoke can land before the provider registered its models
     // and is dropped silently, so a probe that only polls would time out on a healthy provider.
-    const delays = probeDelays(PROBE_BUDGET_MS)
-    expect(delays.length).toBeGreaterThan(5)
+    expect(probeDelays(PROBE_BUDGET_MS).length).toBeGreaterThan(5)
   })
 
   it('backs off from the start delay up to the cap', () => {
@@ -153,6 +153,7 @@ describe('probe budget', () => {
   })
 
   it('shortens the re-probe of a plugin last seen without the protocol', () => {
+    // Asserts serialize: a missing provider must not stall each slot for six seconds.
     expect(probeBudgetMs('adopt')).toBe(PROBE_REPROBE_BUDGET_MS)
     expect(PROBE_REPROBE_BUDGET_MS).toBeLessThan(PROBE_BUDGET_MS)
   })

@@ -14,7 +14,15 @@ export const EMBED_HOST_ATTR = 'data-embed-host'
 /** Marks the root of a provider-injected subtree; its presence is the only mount acknowledgment. */
 export const EMBED_OWNER_ATTR = 'data-embed-owner'
 
-export type SlotName = 'top' | 'bottom'
+/**
+ * A slot's configured id (`SlotConfig.id`, `s_xxxxxx`), used as an opaque token.
+ *
+ * Opaque is the whole point: it is generated once and never derived from position, so it survives
+ * inserting, removing and reordering slots. Slot-element identity is the protocol's wipe-vs-eviction
+ * discriminator (host rule 4), so an id that shifted with position would make one insertion read as a
+ * wave of remounts and evictions. Nothing here may parse or order it.
+ */
+export type SlotId = string
 
 /** How a plugin's view gets into a slot. */
 export type EmbedStrategy =
@@ -100,17 +108,8 @@ export function droppedByLifecycle(
 }
 
 /** DOM id of a slot element. Stable, and a valid CSS ident for well-formed plugin ids. */
-export function slotElementId(hostPid: string, slot: SlotName): string {
-  return `${hostPid}--slot-${slot}`
-}
-
-/** Escape a value for interpolation into a double-quoted HTML attribute. */
-export function escapeAttribute(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
+export function slotElementId(hostPid: string, slotId: SlotId): string {
+  return `${hostPid}--slot-${slotId}`
 }
 
 /** Selector matching one provider's embed subtree root (quoted — no CSS ident escaping needed). */

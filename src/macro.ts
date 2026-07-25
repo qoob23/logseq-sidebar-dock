@@ -18,7 +18,7 @@
  * emission and the wrapper element live in `dock.ts`.
  */
 
-import { type SlotName } from './embed'
+import { type SlotId } from './embed'
 
 /** The `hookApp` event the host itself uses for renderer macros; we re-emit it verbatim. */
 export const MACRO_HOOK_TYPE = 'macro-renderer-slotted'
@@ -72,8 +72,8 @@ export function parseMacroSpec(raw: string): readonly string[] | null {
  * injected element in place instead of stacking a second one) and a bare CSS ident for well-formed
  * plugin ids — same assumption as `slotElementId`.
  */
-export function macroSlotDomId(hostPid: string, slot: SlotName): string {
-  return `${hostPid}--macro-${slot}`
+export function macroSlotDomId(hostPid: string, slotId: SlotId): string {
+  return `${hostPid}--macro-${slotId}`
 }
 
 /** The `hookApp` payload, shaped exactly like the one the host emits for a real renderer macro. */
