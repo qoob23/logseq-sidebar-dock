@@ -1,0 +1,10 @@
+# No trailing slash: a worktree under .claude/worktrees/ gets node_modules as a SYMLINK to the
+# repo's, and `node_modules/` matches only a real directory — the symlink showed up as untracked.
+node_modules
+# vite build output; `logseq.main` points into it — rebuildable, never committed.
+dist/
+*.tsbuildinfo
+*.log
+.DS_Store
+.claude/
+/.headroom
