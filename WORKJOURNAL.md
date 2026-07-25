@@ -79,3 +79,42 @@
       a corpse's capture-phase `stopImmediatePropagation` otherwise blocks both the successor and the host itself.
     - Host's `localStorage` width is never updated again while we are installed — uninstalling reverts to whatever
       Logseq last remembered on its own, not the width in use.
+
+## 2026-07-26
+
+- Replaced the two fixed slots with **N user-named layouts × N slots**, configured from the dock's own UI; the
+  whole model (types, normalization, resolution, eleven edit ops) is pure in `config.ts`, spec'd in
+  `docs/layout-config.md`. Settings are three flat keys plus one canonical-JSON blob.
+    - **Decision — generated stable ids, never positional**: slot-element identity is the wipe-vs-eviction
+      discriminator, the macro wrapper's `getElementById` target and the protocol `slot` payload, so `slot-0`
+      style ids would make inserting one slot read as a wave of remounts and evictions across every sibling.
+    - **Decision — weights, not percentages**: a divider moves weight between its own two neighbours only, so
+      adding or removing a slot never renormalizes the rest. A px floor replaces the old 15–85% clamp.
+    - **Decision — the `provideUI` template shrinks to a static shell**; tabs/slots/dividers/controls are built and
+      reconciled in the host realm by id. Sidesteps DOMPurify (native `<select>`/`<input>` become usable) and,
+      the real win, a config change never re-injects the template — so adding a slot leaves its siblings' mounts
+      untouched instead of tearing every docked plugin down.
+    - Host delegation is bound for `change`/`input` too, not just `click`, and `transformableEvent` hands the model
+      `{ value, dataset }` and no element — that pair is the whole channel, so every control carries `data-*`. One
+      `sdockReclaim` model keyed by `data-slot-id` replaces v1's per-slot pre-registered model names.
+    - **Decision — lazy-mount a layout on first reveal, then never unmount**: hidden layouts keep their iframes
+      alive, but booting every configured plugin at startup would cost several 6 s embed probes before first paint.
+    - **Decision — a pid may appear in several layouts**; embed providers mount per slot, but an `adopt` plugin has
+      one node, so only the active layout may hold it. The reload on switching is priced in and warned about.
+    - Canonical key order in the serialized blob is load-bearing: `settingsDiffer` compares with `!==`, so a
+      non-deterministic order makes every host echo read as a change and drives a self-sustaining assert loop.
+    - **Decision — a broken `layouts` JSON keeps rendering the last config that parsed and never writes the key**:
+      editing raw JSON guarantees transient syntax errors mid-keystroke, and blanking would reload every view.
+    - **Decision — in-memory side effects belong INSIDE the `edit()` gate** (an `applied` callback), not around it.
+      Doing it around produced both bugs it now prevents: edit chrome erupting over live views on some later
+      unrelated assert, and a refused layout removal demoting a mounted layout to never-filled-again.
+    - Destructive removes arm-then-confirm on a second click — there is no prompt API and `showMsg` is one-way.
+- Re-implemented the header-row strip and the width override on the new architecture instead of rebasing (they
+  touched every rewritten file); `merge -s ours` records their commits as ancestors while keeping this tree.
+    - **Decision — the built-in tab stays `Nav`**: "Plugins" names nothing once every other tab is a user layout.
+    - Wrapping is placement-dependent — wraps in the sidebar fallback, ellipsizes in the header row, where an
+      extra row would grow the app header itself.
+    - `sheetMarker` gained the width: it is the only proof a fire-and-forget sheet has landed, and a resize changes
+      neither a weight nor the tab, so without it the dock accepts the stale sheet and snaps back for a frame.
+    - Width persistence deliberately bypasses `edit()` — that gate refuses while the layout JSON is broken, and a
+      config typo must not also cost the user the ability to resize the sidebar.
