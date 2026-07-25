@@ -7,6 +7,7 @@
  * by re-providing this sheet, so nothing ever unmounts (a hidden docked iframe keeps running).
  */
 
+import { VIEWPORT_RESERVE_PX } from './divider'
 import { type DockMode, type ViewSpec } from './settings'
 
 export interface DockCssOptions {
@@ -16,6 +17,8 @@ export interface DockCssOptions {
   mode: DockMode
   /** Share (%) of the dock height given to the top slot when both slots are configured. */
   splitPct: number
+  /** Sidebar width (px) to force on either face; `0` leaves the host's own width alone. */
+  sidebarWidthPx: number
   /** What the top slot shows, already resolved from the settings. */
   viewTop: ViewSpec
   /** What the bottom slot shows, already resolved from the settings. */
@@ -74,6 +77,17 @@ function layoutRules(layout: SlotLayout): string {
  */
 export function splitVarFallback(splitPct: number): string {
   return `var(--sdock-split, ${splitPct})`
+}
+
+/**
+ * The `var()` reference the sidebar-width override is built from.
+ *
+ * Same dual role as {@link splitVarFallback}: it is both the rendered value and the probe text
+ * `dock.ts` looks for in the landed sheet before dropping the drag-time inline var, so the two sides
+ * share this one function rather than each spelling the string out.
+ */
+export function widthVarFallback(px: number): string {
+  return `var(--sdock-width, ${px}px)`
 }
 
 /**
@@ -152,6 +166,39 @@ ${dockId} {
 }`
 }
 
+/**
+ * The sidebar-width override — mode-independent, unlike everything in {@link modeRules}.
+ *
+ * Zero means "no override": the sheet then says nothing about the width at all, and `dock.ts`'s
+ * landed-sheet probe knows not to look for it.
+ */
+function widthRules(sidebarWidthPx: number): string {
+  if (sidebarWidthPx <= 0) return ''
+
+  return `
+
+/* The sidebar is widened past the limit the host imposes on ITSELF: its resizer clamps to 240-460px
+   and writes the result as an INLINE custom property on <html>. An !important author declaration
+   outranks a non-important inline one — that is the entire mechanism — and since every downstream
+   rule (#left-sidebar's width, main's padding-left, the header cell's min-width) reads this one var,
+   the whole layout follows coherently.
+   Unconditional across both faces on purpose: the dock width IS the sidebar width, so there is one
+   remembered value and flipping the face never relayouts the main content behind it. It also
+   supersedes the host's resizer outright instead of half-masking it — left live on the Navigation
+   face, that resizer could only write a clamped value this very rule masks anyway.
+   Gated on the sidebar being OPEN, because not every downstream rule is: main's padding-left is
+   scoped to .is-left-sidebar-open, but the header's left cell takes
+   \`min-width: var(--ls-left-sidebar-width)\` unconditionally (header.css). Ungated, a closed
+   sidebar would still reserve our widened value in that cell and shove the search button and
+   everything right of it across the header — room held for a column nothing is showing.
+   Capped to the viewport reserve, mirroring the drag-time clamp: a width persisted on a wide window
+   must never swallow a narrower one later — the handle to drag it back would itself sit past the
+   viewport edge, and with the override on BOTH faces there is no face left to escape to. */
+html:has(main.ls-left-sidebar-open) {
+  --ls-left-sidebar-width: min(${widthVarFallback(sidebarWidthPx)}, calc(100vw - ${VIEWPORT_RESERVE_PX}px)) !important;
+}`
+}
+
 /** The complete stylesheet for the keyed `provideStyle` sheet. */
 export function buildDockCss(opts: DockCssOptions): string {
   const dockId = `#${escapeIdent(opts.pluginId)}--dock`
@@ -180,7 +227,7 @@ ${dockId} {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-}
+}${widthRules(opts.sidebarWidthPx)}
 
 ${modeRules(dockId, opts.mode)}
 

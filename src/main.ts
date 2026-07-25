@@ -11,6 +11,9 @@ import {
   SPLIT_MAX,
   SPLIT_MIN,
   SettingsStore,
+  WIDTH_FOLLOW_HOST,
+  WIDTH_MAX,
+  WIDTH_MIN,
   settingsDiffer,
 } from './settings'
 
@@ -96,6 +99,16 @@ function main(): void {
         default: settings.splitPct,
         title: 'Divider position (%)',
         description: `Share of the dock given to the top view (${SPLIT_MIN}–${SPLIT_MAX}). Also set by dragging the divider.`,
+      },
+      {
+        key: 'sidebarWidthPx',
+        type: 'number',
+        default: settings.sidebarWidthPx,
+        title: 'Sidebar width (px)',
+        description:
+          `How wide the left sidebar is, on both faces (${WIDTH_MIN}–${WIDTH_MAX}); ` +
+          `${WIDTH_FOLLOW_HOST} follows Logseq's own width. Also set by dragging Logseq's sidebar ` +
+          "resizer, which ignores Logseq's own 460px limit.",
       },
     ])
   }

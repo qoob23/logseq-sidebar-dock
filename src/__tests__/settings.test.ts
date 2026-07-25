@@ -8,6 +8,9 @@ import {
   type SlotSpecs,
   SettingsStore,
   type ViewSpec,
+  WIDTH_FOLLOW_HOST,
+  WIDTH_MAX,
+  WIDTH_MIN,
   configSignature,
   normalizeSettings,
   parseAdoptPokes,
@@ -70,6 +73,25 @@ describe('normalizeSettings', () => {
     expect(normalizeSettings({ splitPct: 1000 }).splitPct).toBe(SPLIT_MAX)
   })
 
+  it('reads the sidebar width override, zero meaning "follow the host"', () => {
+    expect(normalizeSettings({}).sidebarWidthPx).toBe(WIDTH_FOLLOW_HOST)
+    expect(normalizeSettings({ sidebarWidthPx: 0 }).sidebarWidthPx).toBe(WIDTH_FOLLOW_HOST)
+    expect(normalizeSettings({ sidebarWidthPx: '   ' }).sidebarWidthPx).toBe(WIDTH_FOLLOW_HOST)
+    expect(normalizeSettings({ sidebarWidthPx: 'not a number' }).sidebarWidthPx).toBe(WIDTH_FOLLOW_HOST)
+    expect(normalizeSettings({ sidebarWidthPx: Number.NaN }).sidebarWidthPx).toBe(WIDTH_FOLLOW_HOST)
+    expect(normalizeSettings({ sidebarWidthPx: Number.POSITIVE_INFINITY }).sidebarWidthPx).toBe(
+      WIDTH_FOLLOW_HOST,
+    )
+  })
+
+  it('clamps a real sidebar width to its range and rounds it', () => {
+    expect(normalizeSettings({ sidebarWidthPx: 620 }).sidebarWidthPx).toBe(620)
+    expect(normalizeSettings({ sidebarWidthPx: '620.456' }).sidebarWidthPx).toBe(620.46)
+    expect(normalizeSettings({ sidebarWidthPx: 1 }).sidebarWidthPx).toBe(WIDTH_MIN)
+    expect(normalizeSettings({ sidebarWidthPx: -400 }).sidebarWidthPx).toBe(WIDTH_MIN)
+    expect(normalizeSettings({ sidebarWidthPx: 99_999 }).sidebarWidthPx).toBe(WIDTH_MAX)
+  })
+
   it('ignores unrelated keys such as the host-managed `disabled` flag', () => {
     expect(normalizeSettings({ disabled: false })).toEqual(DEFAULT_SETTINGS)
   })
@@ -99,6 +121,7 @@ describe('settingsDiffer', () => {
     expect(settingsDiffer(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, macroTop: '{{renderer :a}}' })).toBe(true)
     expect(settingsDiffer(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, macroBottom: ':a' })).toBe(true)
     expect(settingsDiffer(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, adoptPoke: 'a = models.b' })).toBe(true)
+    expect(settingsDiffer(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, sidebarWidthPx: 620 })).toBe(true)
   })
 })
 
@@ -207,6 +230,29 @@ describe('SettingsStore', () => {
     store.override({ macroTop: '  ', adoptPoke: '' })
     expect(store.current().macroTop).toBe('')
     expect(store.current().adoptPoke).toBe('')
+  })
+
+  it('carries a dragged sidebar width until the echo agrees, clamping it like the echo path', () => {
+    const store = new SettingsStore({ sidebarWidthPx: 0 })
+    store.override({ sidebarWidthPx: 620 })
+    expect(store.current().sidebarWidthPx).toBe(620)
+
+    // Still the pre-write value on the host side.
+    store.applyEcho({ sidebarWidthPx: 0 })
+    expect(store.current().sidebarWidthPx).toBe(620)
+
+    store.applyEcho({ sidebarWidthPx: 620 })
+    store.applyEcho({ sidebarWidthPx: 99_999 })
+    expect(store.current().sidebarWidthPx).toBe(WIDTH_MAX)
+
+    store.override({ sidebarWidthPx: 5 })
+    expect(store.current().sidebarWidthPx).toBe(WIDTH_MIN)
+  })
+
+  it('lets the user switch the width override OFF — zero is a value, not "no change"', () => {
+    const store = new SettingsStore({ sidebarWidthPx: 620 })
+    store.override({ sidebarWidthPx: WIDTH_FOLLOW_HOST })
+    expect(store.current().sidebarWidthPx).toBe(WIDTH_FOLLOW_HOST)
   })
 
   it('trims an overridden macro spec so it matches the echoed one', () => {

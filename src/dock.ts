@@ -12,7 +12,7 @@
 
 import '@logseq/libs'
 
-import { computeSplitPct } from './divider'
+import { computeSidebarWidth, computeSplitPct } from './divider'
 import {
   type BodyLike,
   EMBED_HOST_ATTR,
@@ -46,11 +46,12 @@ import {
   type SettingsStore,
   type SlotSpecs,
   type ViewSpec,
+  WIDTH_FOLLOW_HOST,
   configSignature,
   parseAdoptPokes,
   resolveSlotSpecs,
 } from './settings'
-import { buildDockCss, splitVarFallback } from './styles'
+import { buildDockCss, splitVarFallback, widthVarFallback } from './styles'
 
 /** `provideUI` key — becomes the container id `#<pid>--dock`, so it must be a bare CSS ident. */
 const DOCK_KEY = 'dock'
@@ -68,6 +69,18 @@ const DOCK_PATH = '#left-sidebar .left-sidebar-inner > .wrap'
 const TABS_PATH = '.cp__header > .l'
 /** Toggled on our own container while a drag is in flight (see {@link Dock.installDragPassthrough}). */
 const DRAGGING_CLASS = 'sdock-dragging'
+/** The host's own sidebar resizer handle, which we hijack outright (see {@link Dock.assertWidthResizer}). */
+const WIDTH_RESIZER_SELECTOR = '#left-sidebar .left-sidebar-resizer'
+/** The sidebar element the host resizes — and the parent of the handle above. */
+const SIDEBAR_ID = 'left-sidebar'
+/** Transient inline override of the sidebar width, read by the sheet's `widthVarFallback`. */
+const WIDTH_VAR = '--sdock-width'
+/**
+ * The host's OWN transient drag classes (`container.cljs`, `sidebar-resizer`): they suppress the
+ * sidebar's width transition, without which every drag frame trails the pointer.
+ */
+const RESIZING_CLASS = 'is-resizing'
+const RESIZING_BUF_CLASS = 'is-resizing-buf'
 
 const POLL_START_MS = 50
 const POLL_MAX_MS = 500
@@ -233,6 +246,20 @@ export class Dock {
   /** Aborts the host-document listeners bound for the duration of one divider drag. */
   private dragAbort: AbortController | null = null
   private dragging = false
+  /** The host resizer handle our listeners are bound to — tracked by identity, never by marking it. */
+  private widthResizerEl: HTMLElement | null = null
+  /** Aborts the listeners bound to {@link widthResizerEl}. */
+  private widthResizerAbort: AbortController | null = null
+  /** Aborts the host-document listeners bound for the duration of one sidebar-width drag. */
+  private widthDragAbort: AbortController | null = null
+  private widthDragging = false
+  /**
+   * Takes back a seeded-but-never-persisted width override (see {@link startWidthDrag}); nulled the
+   * moment a drag persists for real. Without it an aborted drag — or a plain click on the handle —
+   * would leave a phantom override in the store that no settings echo can ever agree with, silently
+   * masking even a hand-edited `sidebarWidthPx` until the plugin reloads.
+   */
+  private widthDragRevert: (() => void) | null = null
   private running = false
   private queued = false
   private disposed = false
@@ -317,10 +344,18 @@ export class Dock {
     this.endDrag()
     this.dividerAbort?.abort()
     this.dividerAbort = null
+    this.widthResizerAbort?.abort()
+    this.widthResizerAbort = null
+    this.widthResizerEl = null
     this.undockAll('dispose')
 
     const doc = getHostDocument()
     if (doc === null) return
+    // The width override itself dies with the provided sheet; the transient var and the host's own
+    // drag classes are ours to take back by hand.
+    this.endWidthDrag(doc)
+    doc.documentElement.style.removeProperty(WIDTH_VAR)
+
     const cleanup = takeHostCleanup(doc)
     if (cleanup !== null) runQuietly(cleanup)
     doc.getElementById(this.containerId)?.remove()
@@ -335,6 +370,7 @@ export class Dock {
     const generation = ++this.watchGeneration
     this.provideStyle()
     this.assertTabs(doc)
+    this.assertWidthResizer(doc)
 
     // Missing, detached, or emptied by a third party — all heal the same way. Re-calling `provideUI`
     // with the same key rewrites the container's innerHTML, so rescue adopted nodes first.
@@ -361,20 +397,31 @@ export class Dock {
     if (this.disposed || generation !== this.watchGeneration) return
     this.watchMissingViews(generation)
 
-    // The stylesheet is what carries the split from here on — but `provideStyle` is fire-and-forget,
-    // so only drop the drag-time inline override once the new sheet is provably in the host document.
-    // Clearing it earlier flashes the previous ratio for a few frames.
-    if (this.dragging || root.style.getPropertyValue('--sdock-split') === '') return
-    if (await this.waitForSheet(doc, generation)) {
-      if (!this.dragging && generation === this.watchGeneration) root.style.removeProperty('--sdock-split')
-    }
+    // The stylesheet is what carries the split and the sidebar width from here on — but
+    // `provideStyle` is fire-and-forget, so only drop the drag-time inline overrides once the new
+    // sheet is provably in the host document. Clearing one earlier flashes the previous value for a
+    // few frames. Either may be standing on its own, so neither can early-return over the other.
+    const clearSplit = !this.dragging && root.style.getPropertyValue('--sdock-split') !== ''
+    const clearWidth =
+      !this.widthDragging && doc.documentElement.style.getPropertyValue(WIDTH_VAR) !== ''
+    if (!clearSplit && !clearWidth) return
+    if (!(await this.waitForSheet(doc, generation))) return
+    if (generation !== this.watchGeneration) return
+    if (clearSplit && !this.dragging) root.style.removeProperty('--sdock-split')
+    if (clearWidth && !this.widthDragging) doc.documentElement.style.removeProperty(WIDTH_VAR)
   }
 
-  /** True once the sheet standing in the host document carries the split we last provided. */
+  /** True once the sheet standing in the host document carries the values we last provided. */
   private isSheetCurrent(doc: Document): boolean {
     const el = doc.querySelector(`[data-injected-style="${STYLE_KEY}-${this.pluginId}"]`)
     if (el === null) return false
-    return el.textContent?.includes(splitVarFallback(this.store.current().splitPct)) ?? false
+    const css = el.textContent ?? ''
+    const { splitPct, sidebarWidthPx } = this.store.current()
+    // The width rule only exists while an override is actually in force — with none the sheet
+    // legitimately carries no width rule at all, and demanding one anyway would strand the transient
+    // var (and the width it carries) forever.
+    if (sidebarWidthPx > 0 && !css.includes(widthVarFallback(sidebarWidthPx))) return false
+    return css.includes(splitVarFallback(splitPct))
   }
 
   private async waitForSheet(doc: Document, generation: number): Promise<boolean> {
@@ -435,7 +482,7 @@ export class Dock {
   }
 
   private provideStyle(): void {
-    const { mode, splitPct } = this.store.current()
+    const { mode, splitPct, sidebarWidthPx } = this.store.current()
     const specs = this.specs()
     logseq.provideStyle({
       key: STYLE_KEY,
@@ -443,6 +490,7 @@ export class Dock {
         pluginId: this.pluginId,
         mode,
         splitPct,
+        sidebarWidthPx,
         viewTop: specs.top,
         viewBottom: specs.bottom,
       }),
@@ -1067,6 +1115,162 @@ export class Dock {
     this.dragAbort = null
   }
 
+  // ------------------------------------------------------------------ sidebar width
+
+  /**
+   * Hijack the host's own sidebar resizer — on both faces, whatever the mode.
+   *
+   * The host clamps its own drag to 240–460px — far too narrow for two docked plugin views — so the
+   * handle drives OUR width instead. Unconditional, because the dock width IS the sidebar width: our
+   * `!important` rule masks whatever the host's clamped drag would write anyway, so leaving that drag
+   * live on the Navigation face would only make the handle feel broken there. Its handler is an
+   * interact.js draggable bound on the DOCUMENT in the bubble phase, so a capture-phase listener on
+   * the handle itself runs long before it and can stop the event from ever reaching it.
+   *
+   * Failure mode, should that stop holding (interact.js binding in capture, or directly on the
+   * handle): both drags run, the host writes its clamped value into the inline
+   * `--ls-left-sidebar-width` — and our `!important` rule simply masks it. Degraded to the host's
+   * clamp, never broken.
+   *
+   * Bound by element IDENTITY rather than by marking the node: the handle is host-rendered markup,
+   * so any attribute of ours would be wiped by the next re-render and we would re-bind on a node
+   * that already carries our listeners.
+   */
+  private assertWidthResizer(doc: Document): void {
+    const el = doc.querySelector<HTMLElement>(WIDTH_RESIZER_SELECTOR)
+    if (el === this.widthResizerEl) return
+
+    // A fresh handle means the old listeners (and any drag they had in flight) belong to a dead node.
+    this.endWidthDrag(doc)
+    this.widthResizerAbort?.abort()
+    this.widthResizerAbort = null
+    this.widthResizerEl = el
+    if (el === null) return
+
+    const abort = new AbortController()
+    this.widthResizerAbort = abort
+    const signal = abort.signal
+
+    el.addEventListener(
+      'pointerdown',
+      (ev) => {
+        if (ev.pointerType === 'mouse' && ev.button !== 0) return
+        ev.stopPropagation()
+        ev.stopImmediatePropagation()
+        ev.preventDefault()
+        this.startWidthDrag(doc, ev)
+      },
+      { signal, capture: true },
+    )
+
+    // interact.js may bind mouse events rather than pointer events, and swallowing `pointerdown`
+    // does not suppress the compatibility `mousedown` that follows it.
+    el.addEventListener(
+      'mousedown',
+      (ev) => {
+        if (!this.widthDragging) return
+        ev.stopPropagation()
+        ev.stopImmediatePropagation()
+        ev.preventDefault()
+      },
+      { signal, capture: true },
+    )
+  }
+
+  /**
+   * Our replacement for the host's clamped drag: the same handle and the same transient feedback,
+   * our own bounds.
+   *
+   * Writing `--sdock-width` inline on `documentElement` is not what the "never write inline styles
+   * onto host nodes" rule is about: `<html>` is not host-RENDERED markup (no re-render wipes it) and
+   * this is the host's own channel for exactly this value — `container.cljs` sets
+   * `--ls-left-sidebar-width` there itself. The persistent value still goes through the sheet.
+   *
+   * No `setPointerCapture` on the handle: it belongs to the host, and the capture-phase listeners on
+   * the host document are the real guarantee anyway (the divider's own capture call is best-effort).
+   */
+  private startWidthDrag(doc: Document, down: PointerEvent): void {
+    this.endWidthDrag(doc)
+    const sidebar = doc.getElementById(SIDEBAR_ID)
+    if (sidebar === null) return
+
+    const abort = new AbortController()
+    this.widthDragAbort = abort
+    const signal = abort.signal
+    this.widthDragging = true
+
+    // The host's own transient classes, set the way the host sets them (see RESIZING_CLASS).
+    sidebar.classList.add(RESIZING_CLASS)
+    doc.documentElement.classList.add(RESIZING_BUF_CLASS)
+
+    // With no override in force the sheet carries no `!important` rule at all, so nothing would read
+    // the transient var and the first drag frames would do nothing. Seed it with the width the
+    // sidebar already has — the same value, so visually a no-op — to bring that rule into existence.
+    // The seed is NOT a chosen width, so `widthDragRevert` stands ready to take it back until a real
+    // move persists it (see the field's doc for the phantom-override failure it prevents).
+    let latest = this.store.current().sidebarWidthPx
+    let moved = false
+    if (latest <= 0) {
+      const seedRect = sidebar.getBoundingClientRect()
+      latest = computeSidebarWidth(seedRect.right, seedRect.left, doc.documentElement.clientWidth)
+      this.store.override({ sidebarWidthPx: latest })
+      this.provideStyle()
+      this.widthDragRevert = (): void => {
+        if (this.disposed) return
+        this.store.override({ sidebarWidthPx: WIDTH_FOLLOW_HOST })
+        this.provideStyle()
+      }
+    }
+
+    doc.addEventListener(
+      'pointermove',
+      (ev) => {
+        // A second finger must not yank the sidebar.
+        if (ev.pointerId !== down.pointerId) return
+        if (ev.clientX !== down.clientX) moved = true
+        const rect = sidebar.getBoundingClientRect()
+        latest = computeSidebarWidth(ev.clientX, rect.left, doc.documentElement.clientWidth)
+        doc.documentElement.style.setProperty(WIDTH_VAR, `${latest}px`)
+      },
+      { signal, capture: true },
+    )
+
+    const finish = (ev: PointerEvent): void => {
+      if (ev.pointerId !== down.pointerId) return
+      if (!this.widthDragging) return
+      // A click, not a drag: the user chose nothing, so nothing may persist — least of all the
+      // seed, which would freeze "follow the host" into a fixed width. endWidthDrag reverts it.
+      if (!moved) {
+        this.endWidthDrag(doc)
+        return
+      }
+      this.widthDragRevert = null
+      this.store.override({ sidebarWidthPx: latest })
+      // Bake the width into the persistent sheet. The inline var stays until the next assert clears
+      // it: `provideStyle` is fire-and-forget, so dropping it here snaps back for a few frames.
+      this.provideStyle()
+      logseq.updateSettings({ sidebarWidthPx: this.store.current().sidebarWidthPx })
+      this.endWidthDrag(doc)
+    }
+    doc.addEventListener('pointerup', finish, { signal, capture: true })
+    doc.addEventListener('pointercancel', finish, { signal, capture: true })
+  }
+
+  private endWidthDrag(doc: Document): void {
+    this.widthDragging = false
+    this.widthDragAbort?.abort()
+    this.widthDragAbort = null
+    // An unfinished (aborted or never-moved) drag takes its seeded override back; a drag that
+    // persisted cleared this first, so the persisted value stands.
+    const revert = this.widthDragRevert
+    this.widthDragRevert = null
+    revert?.()
+    // Idempotent, and safe when no drag ever ran: these are the host's classes and it removes them
+    // on its own dragend the same way.
+    doc.getElementById(SIDEBAR_ID)?.classList.remove(RESIZING_CLASS)
+    doc.documentElement.classList.remove(RESIZING_BUF_CLASS)
+  }
+
   // ------------------------------------------------------------------ host hooks
 
   private installHostHooks(): void {
@@ -1086,8 +1290,14 @@ export class Dock {
         timer = null
         if (this.disposed) return
         // Two independent injections in two different host subtrees: either one going down (or the
-        // header cell finally showing up) is a reason to re-assert.
-        if (!isHealthy(doc.getElementById(this.containerId)) || !isTabsHealthy(doc, this.tabsId)) {
+        // header cell finally showing up) is a reason to re-assert. So is the host re-rendering its
+        // resizer handle, which would otherwise leave our hijack bound to a dead node until some
+        // unrelated event came along.
+        if (
+          !isHealthy(doc.getElementById(this.containerId)) ||
+          !isTabsHealthy(doc, this.tabsId) ||
+          doc.querySelector<HTMLElement>(WIDTH_RESIZER_SELECTOR) !== this.widthResizerEl
+        ) {
           void this.assert()
         }
       }, OBSERVER_DEBOUNCE_MS)
@@ -1120,6 +1330,9 @@ export class Dock {
     const offPassthrough = this.installDragPassthrough(doc)
 
     setHostCleanup(doc, () => {
+      // Usually run by a SUCCESSOR instance over a corpse of ours (kill without `beforeunload`), so
+      // silence the pending async loops too; on the normal dispose path this is already true.
+      this.disposed = true
       if (timer !== null) {
         clearTimeout(timer)
         timer = null
@@ -1128,6 +1341,14 @@ export class Dock {
       offRoute()
       offLifecycle?.()
       offPassthrough()
+      // The width hijack binds capture listeners (with stopImmediatePropagation) to a HOST node that
+      // outlives our module scope. Left standing after a kill-without-`beforeunload`, the stale
+      // listener would fire first and block both the successor's hijack and the host's own resizer.
+      this.endWidthDrag(doc)
+      this.widthResizerAbort?.abort()
+      this.widthResizerAbort = null
+      this.widthResizerEl = null
+      doc.documentElement.style.removeProperty(WIDTH_VAR)
     })
   }
 

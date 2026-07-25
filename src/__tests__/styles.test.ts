@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import { EMBED_OWNER_ATTR } from '../embed'
 import { type ViewSpec } from '../settings'
-import { type DockCssOptions, buildDockCss, resolveLayout, splitVarFallback } from '../styles'
+import {
+  type DockCssOptions,
+  buildDockCss,
+  resolveLayout,
+  splitVarFallback,
+  widthVarFallback,
+} from '../styles'
 
 const NONE: ViewSpec = { kind: 'none' }
 const plugin = (pid: string): ViewSpec => ({ kind: 'plugin', pid })
@@ -14,6 +20,7 @@ const OPTS: DockCssOptions = {
   pluginId: 'logseq-sidebar-dock',
   mode: 'nav',
   splitPct: 42,
+  sidebarWidthPx: 620,
   viewTop: plugin('logseq-plugin-a'),
   viewBottom: plugin('logseq-plugin-b'),
 }
@@ -297,6 +304,52 @@ describe('buildDockCss — views mode', () => {
   it('keeps the slot rules so hidden views stay mounted, never unmounted', () => {
     expect(css).toContain(".sdock-slot[data-slot='top']")
     expect(css).toContain(".sdock-slot[data-slot='bottom']")
+  })
+})
+
+describe('buildDockCss — sidebar width override', () => {
+  // The viewport cap mirrors VIEWPORT_RESERVE_PX: a width persisted on a wide window must not
+  // swallow a narrower one later, where the handle to drag it back would itself sit off-screen.
+  const WIDTH_RULE = `--ls-left-sidebar-width: min(${widthVarFallback(620)}, calc(100vw - 200px)) !important;`
+  const WIDTH_SEL = 'html:has(main.ls-left-sidebar-open)'
+
+  it('emits the exact width probe used to detect a landed stylesheet', () => {
+    // dock.ts waits for this substring before dropping the drag-time inline override.
+    expect(widthVarFallback(620)).toBe('var(--sdock-width, 620px)')
+    for (const opts of [OPTS, VIEWS]) {
+      expect(buildDockCss(opts)).toContain(`${WIDTH_SEL} {\n  ${WIDTH_RULE}`)
+      expect(buildDockCss({ ...opts, sidebarWidthPx: 621 })).not.toContain(widthVarFallback(620))
+    }
+  })
+
+  it('overrides the host variable with !important — the only way past its inline value', () => {
+    for (const opts of [OPTS, VIEWS]) {
+      expect(ruleBlocks(buildDockCss(opts), WIDTH_SEL)[0] ?? '').toContain(WIDTH_RULE)
+    }
+  })
+
+  it('applies on BOTH faces — one width, so a face flip never relayouts the main content', () => {
+    // The Navigation face is widened too: the host's own resizer is superseded, not half-masked.
+    expect(buildDockCss({ ...OPTS, sidebarWidthPx: 1200 })).toContain(widthVarFallback(1200))
+    expect(ruleBlocks(buildDockCss(OPTS), WIDTH_SEL)).toEqual(ruleBlocks(buildDockCss(VIEWS), WIDTH_SEL))
+  })
+
+  it('applies only while the sidebar is open — the header cell reserves this width unconditionally', () => {
+    // Ungated, a closed sidebar would keep the widened min-width on `.cp__header > .l` and push the
+    // search button (and everything right of it) across the header for a column nobody can see.
+    for (const opts of [OPTS, VIEWS]) {
+      const css = buildDockCss(opts)
+      expect(css.split('\n').some((line) => line.trim() === 'html {')).toBe(false)
+      expect(ruleBlocks(css, 'html')).toEqual([])
+    }
+  })
+
+  it('emits nothing at all with no override in force, whatever the face or the layout', () => {
+    for (const base of [OPTS, VIEWS]) {
+      for (const views of [base, { ...base, viewTop: NONE }, { ...base, viewTop: NONE, viewBottom: NONE }]) {
+        expect(buildDockCss({ ...views, sidebarWidthPx: 0 })).not.toContain('--ls-left-sidebar-width')
+      }
+    }
   })
 })
 

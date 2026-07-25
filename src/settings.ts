@@ -14,6 +14,18 @@ export const NO_VIEW = 'none'
 export const SPLIT_MIN = 15
 export const SPLIT_MAX = 85
 
+/** Bounds of the sidebar-width override, deliberately far wider than the host's own 240–460 clamp. */
+export const WIDTH_MIN = 180
+export const WIDTH_MAX = 1600
+/**
+ * "No override — the host's own width stands."
+ *
+ * Zero is not a width anyone could want, so it doubles as the off switch: no rule is emitted into the
+ * stylesheet, so the sidebar simply keeps whatever width Logseq gives it — until a drag on the
+ * resizer picks one, which is the moment an override is born (see `dock.ts`'s seeded width drag).
+ */
+export const WIDTH_FOLLOW_HOST = 0
+
 /** Which of the two sidebar faces the segmented control has selected. */
 export type DockMode = 'nav' | 'views'
 
@@ -34,6 +46,8 @@ export interface DockSettings {
   adoptPoke: string
   /** Share (%) of the dock height given to the top slot. */
   splitPct: number
+  /** Sidebar width (px) forced on both faces, or {@link WIDTH_FOLLOW_HOST}. */
+  sidebarWidthPx: number
 }
 
 export const DEFAULT_SETTINGS: DockSettings = {
@@ -44,6 +58,7 @@ export const DEFAULT_SETTINGS: DockSettings = {
   macroBottom: '',
   adoptPoke: '',
   splitPct: 50,
+  sidebarWidthPx: WIDTH_FOLLOW_HOST,
 }
 
 const SETTINGS_KEYS = [
@@ -54,6 +69,7 @@ const SETTINGS_KEYS = [
   'macroBottom',
   'adoptPoke',
   'splitPct',
+  'sidebarWidthPx',
 ] as const
 
 function clamp(value: number, min: number, max: number): number {
@@ -101,6 +117,25 @@ function readNumber(
   return round2(clamp(parsed, min, max))
 }
 
+/**
+ * The sidebar-width override: a clamped px value, or {@link WIDTH_FOLLOW_HOST} for "not overriding".
+ *
+ * {@link readNumber} cannot express this shape — it would clamp the zero sentinel up to
+ * {@link WIDTH_MIN} and silently turn "follow the host" into a 180px sidebar.
+ */
+function normalizeWidth(value: unknown): number {
+  let parsed: number
+  if (typeof value === 'number') {
+    parsed = value
+  } else if (typeof value === 'string' && value.trim() !== '') {
+    parsed = Number(value)
+  } else {
+    return WIDTH_FOLLOW_HOST
+  }
+  if (!Number.isFinite(parsed) || parsed === 0) return WIDTH_FOLLOW_HOST
+  return round2(clamp(parsed, WIDTH_MIN, WIDTH_MAX))
+}
+
 /** Anything that is not exactly a known mode falls back to the default (`nav`). */
 function readMode(source: Record<string, unknown> | null): DockMode {
   const value = source?.['mode']
@@ -120,6 +155,7 @@ export function normalizeSettings(raw: unknown): DockSettings {
     macroBottom: readString(source, 'macroBottom', DEFAULT_SETTINGS.macroBottom),
     adoptPoke: readString(source, 'adoptPoke', DEFAULT_SETTINGS.adoptPoke),
     splitPct: readNumber(source, 'splitPct', DEFAULT_SETTINGS.splitPct, SPLIT_MIN, SPLIT_MAX),
+    sidebarWidthPx: normalizeWidth(source?.['sidebarWidthPx']),
   }
 }
 
@@ -145,6 +181,9 @@ function normalizePatch(patch: Partial<DockSettings>): Partial<DockSettings> {
   if (patch.splitPct !== undefined && Number.isFinite(patch.splitPct)) {
     out.splitPct = round2(clamp(patch.splitPct, SPLIT_MIN, SPLIT_MAX))
   }
+  // Like the free-text fields above and unlike `splitPct`: zero is the legitimate "stop overriding"
+  // value, so it must survive the patch instead of being clamped up or dropped as "no change".
+  if (patch.sidebarWidthPx !== undefined) out.sidebarWidthPx = normalizeWidth(patch.sidebarWidthPx)
   return out
 }
 
