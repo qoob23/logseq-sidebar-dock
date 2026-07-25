@@ -79,3 +79,10 @@ this repo is scaffolded there is no local copy, so read
 - **Driving host UI the plugin API doesn't expose** = reach into the host DOM (same-origin) and dispatch a real
   `.click()`. Match controls by **tabler icon class** (`.ui__icon.ti.ls-icon-x` / `.ti.ti-x`), NEVER by
   `title`/text — those are localized. Always keep a fallback for when the markup shifts.
+
+## Work journal
+
+- @WORKJOURNAL.md — dated build log. **Writing entries:** dense, one line per session (nested list only when
+  needed; **no line > 120 chars**); capture changes + decisions, not behaviour-walkthroughs or code; omit
+  state readable from code (paddings, counts) and process (worktrees, agents) but keep decisions even when
+  they name a value/tool. **Write only on explicit request**; otherwise remind + print a work summary.
