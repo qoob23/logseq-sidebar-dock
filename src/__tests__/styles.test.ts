@@ -1,18 +1,22 @@
 import { describe, expect, it } from 'vitest'
 
 import { EMBED_OWNER_ATTR } from '../embed'
-import { NO_VIEW } from '../settings'
+import { type ViewSpec } from '../settings'
 import { type DockCssOptions, buildDockCss, resolveLayout, splitVarFallback } from '../styles'
+
+const NONE: ViewSpec = { kind: 'none' }
+const plugin = (pid: string): ViewSpec => ({ kind: 'plugin', pid })
+const macro = (raw: string, ...args: string[]): ViewSpec => ({ kind: 'macro', raw, args })
+
+const HOSTED_PIDS = ['logseq-plugin-a', 'logseq-plugin-b']
 
 const OPTS: DockCssOptions = {
   pluginId: 'logseq-sidebar-dock',
   mode: 'nav',
   splitPct: 42,
-  viewTop: 'logseq-plugin-a',
-  viewBottom: 'logseq-plugin-b',
+  viewTop: plugin('logseq-plugin-a'),
+  viewBottom: plugin('logseq-plugin-b'),
 }
-
-const HOSTED_PIDS = [OPTS.viewTop, OPTS.viewBottom]
 const VIEWS: DockCssOptions = { ...OPTS, mode: 'views' }
 
 /** The three host-nav elements views mode hides. */
@@ -44,10 +48,21 @@ function hideBlock(css: string): string {
 
 describe('resolveLayout', () => {
   it('maps the selection to the slots that are actually shown', () => {
-    expect(resolveLayout('a', 'b')).toBe('both')
-    expect(resolveLayout('a', NO_VIEW)).toBe('top-only')
-    expect(resolveLayout(NO_VIEW, 'b')).toBe('bottom-only')
-    expect(resolveLayout(NO_VIEW, NO_VIEW)).toBe('empty')
+    expect(resolveLayout(plugin('a'), plugin('b'))).toBe('both')
+    expect(resolveLayout(plugin('a'), NONE)).toBe('top-only')
+    expect(resolveLayout(NONE, plugin('b'))).toBe('bottom-only')
+    expect(resolveLayout(NONE, NONE)).toBe('empty')
+  })
+
+  it('counts a macro slot as occupied, whatever kind of view fills the other one', () => {
+    expect(resolveLayout(macro(':a', ':a'), plugin('b'))).toBe('both')
+    expect(resolveLayout(macro(':a', ':a'), NONE)).toBe('top-only')
+    expect(resolveLayout(NONE, macro(':b', ':b'))).toBe('bottom-only')
+  })
+
+  it('counts an invalid macro as occupied — that slot still shows a placeholder of its own', () => {
+    expect(resolveLayout({ kind: 'invalid-macro', raw: '{{}}' }, NONE)).toBe('top-only')
+    expect(resolveLayout({ kind: 'invalid-macro', raw: '{{}}' }, plugin('b'))).toBe('both')
   })
 })
 
@@ -128,26 +143,31 @@ describe('buildDockCss', () => {
   })
 
   it('deduplicates hosted plugin ids', () => {
-    const css = buildDockCss({ ...OPTS, viewTop: 'dup', viewBottom: 'dup' })
+    const css = buildDockCss({ ...OPTS, viewTop: plugin('dup'), viewBottom: plugin('dup') })
     // One rule block (line-anchored) plus its single `.sdock-dragging` companion.
     expect(css.split('\n.sdock-slot #dup_lsp_main {').length - 1).toBe(1)
     expect(css.split('.sdock-dragging .sdock-slot #dup_lsp_main {').length - 1).toBe(1)
   })
 
   it('emits no hosted-view rules when both slots are empty', () => {
-    const css = buildDockCss({ ...OPTS, viewTop: NO_VIEW, viewBottom: NO_VIEW })
+    const css = buildDockCss({ ...OPTS, viewTop: NONE, viewBottom: NONE })
     expect(css).not.toContain('_lsp_main')
     expect(css).toContain('.sdock-placeholder')
   })
 
+  it('emits no hosted-view rules for a macro slot, which owns no plugin main UI', () => {
+    const css = buildDockCss({ ...OPTS, viewTop: macro(':pomo', ':pomo'), viewBottom: NONE })
+    expect(css).not.toContain('_lsp_main')
+  })
+
   it('escapes characters that are not valid in a CSS identifier', () => {
-    const css = buildDockCss({ ...OPTS, viewTop: 'odd.id' })
+    const css = buildDockCss({ ...OPTS, viewTop: plugin('odd.id') })
     expect(css).toContain('#odd\\.id_lsp_main')
   })
 
   it('escapes a leading digit with the CSS hex form, not a backslash', () => {
     // `#2do…` is an invalid selector and would silently drop the whole override block.
-    const css = buildDockCss({ ...OPTS, viewTop: '2do-plugin' })
+    const css = buildDockCss({ ...OPTS, viewTop: plugin('2do-plugin') })
     expect(css).toContain('#\\32 do-plugin_lsp_main')
     expect(css).not.toContain('#2do-plugin_lsp_main')
   })
@@ -171,6 +191,33 @@ describe('buildDockCss', () => {
     expect(css).toContain('.sdock-overlay {')
     expect(css).toContain('z-index: 2')
     expect(css).toContain('.sdock-action {')
+  })
+})
+
+describe('buildDockCss — macro slots', () => {
+  // The rules are unconditional: a macro can only ever render inside our own wrapper, so scoping
+  // them to the configured slot would buy nothing and would have to be rebuilt on every flip.
+  const css = buildDockCss({ ...VIEWS, viewTop: macro(':pomo', ':pomo'), viewBottom: NONE })
+
+  it('gives the macro wrapper the whole slot box, scrolling its own content', () => {
+    const block = ruleBlocks(css, '.sdock-slot .sdock-macro')[0] ?? ''
+    expect(block).toContain('position: absolute')
+    expect(block).toContain('inset: 0')
+    expect(block).toContain('overflow-y: auto')
+  })
+
+  it("stretches the host's injected element across the wrapper", () => {
+    expect(ruleBlocks(css, '.sdock-macro [data-injected-ui]')[0] ?? '').toContain('width: 100%')
+  })
+
+  it('beats the ~300px inline-wrapper fallback for an iframe a macro renders', () => {
+    expect(ruleBlocks(css, '.sdock-macro iframe')[0] ?? '').toContain('width: 100% !important')
+  })
+
+  it('leaves drag passthrough to the existing slot-wide rule instead of duplicating it', () => {
+    // `.sdock-macro` lives inside `.sdock-slot`, so a macro iframe is already covered.
+    expect(css).toContain('.sdock-dragging .sdock-slot iframe')
+    expect(css).not.toContain('.sdock-dragging .sdock-macro')
   })
 })
 
@@ -226,7 +273,7 @@ describe('buildDockCss — slot layouts', () => {
   })
 
   it('top only: the top slot takes the dock, the bottom slot and the divider are hidden', () => {
-    const css = buildDockCss({ ...VIEWS, viewBottom: NO_VIEW })
+    const css = buildDockCss({ ...VIEWS, viewBottom: NONE })
     expect(css).toContain(".sdock-slot[data-slot='top'] {\n  flex: 1 1 auto;\n}")
     expect(css).toContain(HIDE_MARKER)
     expect(hideBlock(css)).toContain("[data-slot='bottom']")
@@ -234,7 +281,7 @@ describe('buildDockCss — slot layouts', () => {
   })
 
   it('bottom only: the bottom slot takes the dock, the top slot and the divider are hidden', () => {
-    const css = buildDockCss({ ...VIEWS, viewTop: NO_VIEW })
+    const css = buildDockCss({ ...VIEWS, viewTop: NONE })
     expect(css).toContain(".sdock-slot[data-slot='bottom'] {\n  flex: 1 1 auto;\n}")
     expect(css).toContain(HIDE_MARKER)
     expect(hideBlock(css)).toContain("[data-slot='top']")
@@ -242,7 +289,7 @@ describe('buildDockCss — slot layouts', () => {
   })
 
   it('neither configured: exactly one slot remains, carrying the placeholder', () => {
-    const css = buildDockCss({ ...VIEWS, viewTop: NO_VIEW, viewBottom: NO_VIEW })
+    const css = buildDockCss({ ...VIEWS, viewTop: NONE, viewBottom: NONE })
     expect(css).toContain(".sdock-slot[data-slot='top'] {\n  flex: 1 1 auto;\n}")
     expect(css).toContain(HIDE_MARKER)
     expect(hideBlock(css)).toContain("[data-slot='bottom']")
@@ -251,9 +298,9 @@ describe('buildDockCss — slot layouts', () => {
 
   it('keeps splitPct in the sheet in every layout, so it is ignored but never lost', () => {
     for (const views of [
-      { viewTop: 'a', viewBottom: NO_VIEW },
-      { viewTop: NO_VIEW, viewBottom: 'b' },
-      { viewTop: NO_VIEW, viewBottom: NO_VIEW },
+      { viewTop: plugin('a'), viewBottom: NONE },
+      { viewTop: NONE, viewBottom: plugin('b') },
+      { viewTop: NONE, viewBottom: NONE },
     ]) {
       expect(buildDockCss({ ...VIEWS, ...views })).toContain(splitVarFallback(VIEWS.splitPct))
     }

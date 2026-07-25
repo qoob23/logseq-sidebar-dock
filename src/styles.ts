@@ -7,7 +7,7 @@
  * by re-providing this sheet, so nothing ever unmounts (a hidden docked iframe keeps running).
  */
 
-import { type DockMode, NO_VIEW } from './settings'
+import { type DockMode, type ViewSpec } from './settings'
 
 export interface DockCssOptions {
   /** Our plugin id — the injected container is `#<pluginId>--dock`. */
@@ -16,10 +16,10 @@ export interface DockCssOptions {
   mode: DockMode
   /** Share (%) of the dock height given to the top slot when both slots are configured. */
   splitPct: number
-  /** Plugin id selected for the top slot, or {@link NO_VIEW}. */
-  viewTop: string
-  /** Plugin id selected for the bottom slot, or {@link NO_VIEW}. */
-  viewBottom: string
+  /** What the top slot shows, already resolved from the settings. */
+  viewTop: ViewSpec
+  /** What the bottom slot shows, already resolved from the settings. */
+  viewBottom: ViewSpec
 }
 
 /** Which slots are actually shown, derived from the selection alone. */
@@ -29,10 +29,13 @@ export type SlotLayout = 'both' | 'top-only' | 'bottom-only' | 'empty'
  * One configured view gets the whole dock and the divider disappears; nothing configured shows a
  * single slot carrying the placeholder. `splitPct` is only *ignored* in those layouts — never reset —
  * so the previous ratio comes back the moment both slots are configured again.
+ *
+ * A slot counts as occupied for anything but `none` — an unparseable macro spec included, since that
+ * slot still has a placeholder of its own to show.
  */
-export function resolveLayout(viewTop: string, viewBottom: string): SlotLayout {
-  const hasTop = viewTop !== NO_VIEW
-  const hasBottom = viewBottom !== NO_VIEW
+export function resolveLayout(viewTop: ViewSpec, viewBottom: ViewSpec): SlotLayout {
+  const hasTop = viewTop.kind !== 'none'
+  const hasBottom = viewBottom.kind !== 'none'
   if (hasTop && hasBottom) return 'both'
   if (hasTop) return 'top-only'
   if (hasBottom) return 'bottom-only'
@@ -155,7 +158,10 @@ ${dockId} {
 /** The complete stylesheet for the keyed `provideStyle` sheet. */
 export function buildDockCss(opts: DockCssOptions): string {
   const dockId = `#${escapeIdent(opts.pluginId)}--dock`
-  const pids = [opts.viewTop, opts.viewBottom].filter((pid) => pid !== NO_VIEW)
+  // Only an adopted plugin main UI needs the `!important` cage; a macro renders into our own wrapper.
+  const pids = [opts.viewTop, opts.viewBottom].flatMap((spec) =>
+    spec.kind === 'plugin' ? [spec.pid] : [],
+  )
   const hosted = [...new Set(pids)].map(hostedViewRules).join('\n')
   const layout = resolveLayout(opts.viewTop, opts.viewBottom)
 
@@ -236,12 +242,42 @@ ${modeRules(dockId, opts.mode)}
   overflow: hidden;
 }
 
+/* Neutral-environment guarantee (protocol host rule 6): the Logseq app styles bare iframes —
+   \`iframe { width: 100%; margin: 1rem 0 }\` in common.css — and that 1rem top margin shifts a
+   provider's 100%-height frame down and clips its bottom against the slot's overflow. Undoing the
+   app's own bleed inside our slots is host hygiene, not restyling the provider: :where() keeps this
+   at bare .sdock-slot specificity, so ANY scoped rule a provider writes (class, attribute) wins and
+   a provider that wants margins keeps them. */
+.sdock-slot :where(iframe) {
+  margin: 0;
+}
+
 .sdock-slot[data-slot='top'] {
   flex: 0 0 calc(${splitVarFallback(opts.splitPct)} * 1%);
 }
 
 .sdock-slot[data-slot='bottom'] {
   flex: 1 1 auto;
+}
+
+/* Macro slot: our own wrapper owns the slot box, and the responding plugin's injected UI — appended
+   into it by the host's setupInjectedUI — is laid out inside. Macros are content of unknown height,
+   so this is the one scrolling surface in the dock. */
+.sdock-slot .sdock-macro {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+}
+
+.sdock-macro [data-injected-ui] {
+  width: 100%;
+}
+
+/* Same ~300px inline-wrapper fallback an adopted iframe hits; the drag passthrough below already
+   covers these iframes too, since the wrapper sits inside .sdock-slot. */
+.sdock-macro iframe {
+  width: 100% !important;
+  border: 0;
 }
 
 /* Set while a drag started outside the docked views is in flight (our divider, the host's resizer,

@@ -17,6 +17,7 @@ import {
   EMBED_HOST_ATTR,
   EMBED_OWNER_ATTR,
   type EmbedStrategy,
+  PROBE_REPROBE_BUDGET_MS,
   type SlotName,
   StrategyCache,
   buildEmbedPayload,
@@ -32,12 +33,22 @@ import {
 } from './embed'
 import {
   type HostCleanup,
+  emitHostAppHook,
+  forceCleanInjectedUi,
   getHostDocument,
   setHostCleanup,
   subscribeHostPluginLifecycle,
   takeHostCleanup,
 } from './logseq-types'
-import { NO_VIEW, type SettingsStore } from './settings'
+import { MACRO_HOOK_TYPE, buildMacroHookPayload, macroSlotDomId } from './macro'
+import {
+  type SettingsStore,
+  type SlotSpecs,
+  type ViewSpec,
+  configSignature,
+  parseAdoptPokes,
+  resolveSlotSpecs,
+} from './settings'
 import { buildDockCss, splitVarFallback } from './styles'
 
 /** `provideUI` key — becomes the container id `#<pid>--dock`, so it must be a bare CSS ident. */
@@ -63,9 +74,32 @@ const MISSING_VIEW_BUDGET_MS = 20_000
 /** How long to wait for a provided stylesheet to actually land in the host document. */
 const SHEET_BUDGET_MS = 3_000
 const OBSERVER_DEBOUNCE_MS = 250
+/**
+ * How long to keep re-emitting a macro hook before giving up. Same rationale (and same shape) as the
+ * embed probe: a broadcast that lands before the providing plugin installed its hook is dropped on
+ * the floor, so re-emitting is the only way to survive a cold boot — and it is idempotent, since the
+ * host itself re-emits on every block re-render.
+ */
+const MACRO_HOOK_BUDGET_MS = 6_000
+/**
+ * Shortened budget for a spec nobody has ever answered — the macro equivalent of the embed cache's
+ * re-probe budget, and the same bargain: asserts are serialized, so a macro whose provider is simply
+ * not installed would otherwise stall every single one of them for the full budget. Still worth
+ * retrying (the provider may have arrived), just not at that price.
+ */
+const MACRO_REPROBE_BUDGET_MS = PROBE_REPROBE_BUDGET_MS
+/**
+ * Minimum gap between two pokes of the same plugin. The configured target is very often a TOGGLE, so
+ * a burst of pokes would flap its view on and off instead of opening it once.
+ */
+const POKE_COOLDOWN_MS = 5_000
 
 const NO_SELECTION_TEXT = 'No view selected — pick one in the Sidebar Dock plugin settings.'
 const EVICTED_TEXT = 'View is open in another surface (sidebar/popout).'
+const INVALID_MACRO_TEXT = 'Invalid macro spec — expected something like {{renderer :my-macro, arg}}.'
+const MACRO_UNANSWERED_TEXT = 'No plugin responded to this macro. Is its provider installed and enabled?'
+/** Any element the host's `setupInjectedUI` created — the only acknowledgment a macro hook gets. */
+const INJECTED_UI_SELECTOR = '[data-injected-ui]'
 
 /**
  * Why an adopted node is being handed back.
@@ -88,13 +122,24 @@ type ClearReason =
   /** The plugin is unloading: unmount. */
   | 'dispose'
 
+/**
+ * How a slot is filled. The two embed-protocol outcomes plus `macro`, which belongs to no plugin at
+ * all: it re-emits the host's macro hook and whichever plugin answers renders into our wrapper.
+ */
+type SlotStrategy = EmbedStrategy | 'macro'
+
 interface SlotMount {
+  /** The plugin this mount belongs to; empty for `macro`, where no single plugin owns the view. */
   pid: string
-  strategy: EmbedStrategy
+  strategy: SlotStrategy
   /** Identity of the slot element at mount time — the wipe-vs-eviction discriminator (host rule 4). */
   slotEl: HTMLElement
-  /** `adopt` only: the foreign node we re-parented. */
+  /** `adopt`: the foreign node we re-parented. `macro`: our own wrapper element. */
   node: HTMLElement | null
+  /** `macro` only: the raw spec being rendered — a different spec must re-mount. */
+  macroSpec: string | null
+  /** `adopt` only: whether this mount already spent its one poke (see {@link Dock.poke}). */
+  poked: boolean
   /** `embed` only: watches the slot for the provider removing its subtree. */
   watcher: MutationObserver | null
   /** Debounce timer of {@link watcher}. */
@@ -161,6 +206,14 @@ export class Dock {
   private watchGeneration = 0
   /** Selected plugins whose view could not be resolved during the last assert. */
   private missingPids = new Set<string>()
+  /** When each plugin was last poked — the {@link POKE_COOLDOWN_MS} anti-flapping ledger. */
+  private readonly pokedAt = new Map<string, number>()
+  /** Plugins already poked during the current missing-view episode (see {@link adoptMainUi}). */
+  private readonly pokedWhileMissing = new Set<string>()
+  /** Raw macro specs no plugin has answered yet — they get the shortened budget. */
+  private readonly unansweredMacros = new Set<string>()
+  /** {@link configSignature} as of the last assert; a change retires both memories above. */
+  private configSig = ''
 
   constructor(pluginId: string, store: SettingsStore, onPluginsChanged?: () => void) {
     this.pluginId = pluginId
@@ -262,10 +315,11 @@ export class Dock {
     this.attachDivider(doc, container, root)
 
     this.missingPids.clear()
-    const { viewTop, viewBottom } = this.effectiveViews()
+    const specs = this.specs()
+    this.forgetStaleEpisodes(specs)
     await Promise.all([
-      this.dockView(doc, root, 'top', viewTop),
-      this.dockView(doc, root, 'bottom', viewBottom),
+      this.dockView(doc, root, 'top', specs.top),
+      this.dockView(doc, root, 'bottom', specs.bottom),
     ])
     if (this.disposed || generation !== this.watchGeneration) return
     this.watchMissingViews(generation)
@@ -324,22 +378,37 @@ export class Dock {
     })()
   }
 
+  /** What each slot is asked to show right now — the stylesheet and the mounting code share this. */
+  private specs(): SlotSpecs {
+    return resolveSlotSpecs(this.store.current())
+  }
+
   /**
-   * The selections as the DOM will actually realise them. One plugin's view is a single instance, so
-   * the same pid picked twice only fills the top slot — the stylesheet and the mounting code have to
-   * agree on that, or the layout would keep a slot open for a view that can never arrive.
+   * Retire the "we already tried that" memories when the configuration they were formed under is no
+   * longer the one in force. Both are deliberately sticky — that is what stops a poke or a macro
+   * hook from firing on every assert — so a user who edits the settings to fix exactly that problem
+   * has to be able to clear them.
    */
-  private effectiveViews(): { viewTop: string; viewBottom: string } {
-    const { viewTop, viewBottom } = this.store.current()
-    return { viewTop, viewBottom: viewBottom === viewTop ? NO_VIEW : viewBottom }
+  private forgetStaleEpisodes(specs: SlotSpecs): void {
+    const signature = configSignature(this.store.current().adoptPoke, specs)
+    if (signature === this.configSig) return
+    this.configSig = signature
+    this.pokedWhileMissing.clear()
+    this.unansweredMacros.clear()
   }
 
   private provideStyle(): void {
     const { mode, splitPct } = this.store.current()
-    const { viewTop, viewBottom } = this.effectiveViews()
+    const specs = this.specs()
     logseq.provideStyle({
       key: STYLE_KEY,
-      style: buildDockCss({ pluginId: this.pluginId, mode, splitPct, viewTop, viewBottom }),
+      style: buildDockCss({
+        pluginId: this.pluginId,
+        mode,
+        splitPct,
+        viewTop: specs.top,
+        viewBottom: specs.bottom,
+      }),
     })
   }
 
@@ -378,18 +447,27 @@ export class Dock {
   }
 
   /** Bring one slot in line with the selection: keep, re-mount, evict-notice, or mount fresh. */
-  private async dockView(doc: Document, root: HTMLElement, slot: SlotName, pid: string): Promise<void> {
+  private async dockView(doc: Document, root: HTMLElement, slot: SlotName, spec: ViewSpec): Promise<void> {
     const slotEl = this.slotElement(root, slot)
     if (slotEl === null) return
 
-    if (pid === NO_VIEW) {
+    if (spec.kind === 'none' || spec.kind === 'invalid-macro') {
       this.clearSlot(doc, slot, 'deselect')
-      renderPlaceholder(slotEl, NO_SELECTION_TEXT)
+      renderPlaceholder(slotEl, spec.kind === 'none' ? NO_SELECTION_TEXT : INVALID_MACRO_TEXT)
       return
     }
 
+    if (spec.kind === 'macro') {
+      // Anything short of a live, same-spec wrapper with a responder in it re-mounts: that is what
+      // heals a provider plugin reload, which drops its injected UI without telling us.
+      if (this.isMacroHealthy(this.mounts.get(slot), slotEl, spec.raw)) return
+      await this.mountMacro(doc, slotEl, slot, spec.raw, spec.args)
+      return
+    }
+
+    const pid = spec.pid
     const current = this.mounts.get(slot)
-    if (current !== undefined && current.pid === pid) {
+    if (current !== undefined && current.strategy !== 'macro' && current.pid === pid) {
       if (current.strategy === 'embed') {
         const health = classifySlot({
           sameSlotElement: current.slotEl === slotEl,
@@ -479,21 +557,125 @@ export class Dock {
   private commitEmbed(doc: Document, slotEl: HTMLElement, slot: SlotName, pid: string): void {
     this.releaseMount(doc, this.takeMount(slot), 'deselect')
     clearHostChildren(slotEl)
-    const mount: SlotMount = { pid, strategy: 'embed', slotEl, node: null, watcher: null, watchTimer: null }
+    const mount: SlotMount = {
+      pid,
+      strategy: 'embed',
+      slotEl,
+      node: null,
+      macroSpec: null,
+      poked: false,
+      watcher: null,
+      watchTimer: null,
+    }
     this.mounts.set(slot, mount)
     this.watchEmbedSubtree(slot, mount)
   }
+
+  // ------------------------------------------------------------------ macro slots
+
+  /** A macro mount survives an assert only while its own wrapper is still standing and answered. */
+  private isMacroHealthy(mount: SlotMount | undefined, slotEl: HTMLElement, raw: string): boolean {
+    if (mount === undefined || mount.strategy !== 'macro' || mount.macroSpec !== raw) return false
+    const wrapper = mount.node
+    if (wrapper === null || !wrapper.isConnected || wrapper.parentElement !== slotEl) return false
+    return wrapper.querySelector(INJECTED_UI_SELECTOR) !== null
+  }
+
+  /**
+   * Fill the slot by impersonating the host's own macro render: park a wrapper with a stable id in
+   * the slot, then broadcast `macro-renderer-slotted` naming it until some plugin injects into it
+   * (see `macro.ts` for why the host accepts an element it did not create).
+   *
+   * The record goes in before the first emission so that a responder arriving between two ticks is
+   * never orphaned, and so the usual teardown paths own the wrapper from the start — `releaseMount`
+   * is what runs the host's `_forceCleanInjectedUI` before the wrapper is removed.
+   *
+   * Whatever the slot showed before stays until a responder actually turns up (the wrapper is
+   * positioned over it): a macro nobody answers must not blank its own diagnosis for six seconds on
+   * every single assert.
+   */
+  private async mountMacro(
+    doc: Document,
+    slotEl: HTMLElement,
+    slot: SlotName,
+    raw: string,
+    args: readonly string[],
+  ): Promise<void> {
+    this.releaseMount(doc, this.takeMount(slot), 'deselect')
+
+    // Our module scope resets on reload, the host document does not: an instance killed without
+    // `beforeunload` leaves a wrapper carrying this very id behind. The host resolves the hook's
+    // slot by `getElementById`, so a duplicate would hand our macro to the corpse — and we would
+    // report "nobody answered" over a macro that answered perfectly well.
+    const stale = doc.getElementById(macroSlotDomId(this.pluginId, slot))
+    if (stale !== null) dropMacroWrapper(stale)
+
+    // Built in the HOST realm — this node lives in the host document.
+    const wrapper = doc.createElement('div')
+    wrapper.className = 'sdock-macro'
+    wrapper.id = macroSlotDomId(this.pluginId, slot)
+    slotEl.appendChild(wrapper)
+
+    const mount: SlotMount = {
+      pid: '',
+      strategy: 'macro',
+      slotEl,
+      node: wrapper,
+      macroSpec: raw,
+      poked: false,
+      watcher: null,
+      watchTimer: null,
+    }
+    this.mounts.set(slot, mount)
+
+    const payload = buildMacroHookPayload(wrapper.id, args)
+    const budget = this.unansweredMacros.has(raw) ? MACRO_REPROBE_BUDGET_MS : MACRO_HOOK_BUDGET_MS
+    for (const delay of probeDelays(budget)) {
+      // A newer mount for this slot has taken over (and released this wrapper) — leave it to it.
+      if (this.disposed || this.mounts.get(slot) !== mount) return
+      // Unreachable bridge: nothing will ever answer, so stop burning the budget on it.
+      if (!emitHostAppHook(MACRO_HOOK_TYPE, payload)) break
+      await sleep(delay)
+      if (this.disposed || this.mounts.get(slot) !== mount) return
+      if (wrapper.querySelector(INJECTED_UI_SELECTOR) !== null) {
+        // Answered: only now is it safe to drop whatever the slot was showing before.
+        clearHostChildren(slotEl, wrapper)
+        this.unansweredMacros.delete(raw)
+        return
+      }
+    }
+
+    // Nobody answered: drop the empty wrapper and say so. The next assert retries from scratch, but
+    // on the short budget — this spec has now proven it can stall an assert for nothing.
+    this.unansweredMacros.add(raw)
+    this.releaseMount(doc, this.takeMount(slot), 'deselect')
+    renderPlaceholder(slotEl, MACRO_UNANSWERED_TEXT)
+  }
+
+  // ------------------------------------------------------------------ adoption
 
   /** Legacy strategy: re-parent the plugin's own main-UI container into the slot. */
   private adoptMainUi(doc: Document, slotEl: HTMLElement, slot: SlotName, pid: string): void {
     const canonical = doc.getElementById(`${pid}_lsp_main`)
     if (canonical === null) {
       // Either there is nothing to dock, or the plugin has not finished booting — the missing-view
-      // watch keeps looking for a while before we settle on the placeholder.
+      // watch keeps looking for a while before we settle on the placeholder. A configured poke is
+      // the third possibility: the plugin builds its main UI only once its toggle has run.
       this.missingPids.add(pid)
+      // Once per missing-view EPISODE, not once per assert. A poke target that toggles something
+      // which never becomes a main UI (a modal, a right-sidebar item) would otherwise be re-invoked
+      // forever — every route change and lifecycle event lands here, and they are easily more than
+      // the cooldown apart. The episode ends when this plugin's lifecycle fires or the settings
+      // change; the cooldown is only the backstop for a burst.
+      if (!this.pokedWhileMissing.has(pid) && this.poke(pid)) this.pokedWhileMissing.add(pid)
       renderPlaceholder(slotEl, `"${pid}" has no view to dock. Is the plugin installed and enabled?`)
       return
     }
+
+    // The view turned up, so the missing-view episode is over: if it ever goes missing again that is
+    // a NEW episode and worth one more poke. The flapping case this guards against is exactly the
+    // one that never reaches here, because its poke target never produces a main UI.
+    this.pokedWhileMissing.delete(pid)
 
     clearHostChildren(slotEl)
     slotEl.appendChild(canonical)
@@ -502,11 +684,39 @@ export class Dock {
       strategy: 'adopt',
       slotEl,
       node: canonical,
+      macroSpec: null,
+      poked: false,
       watcher: null,
       watchTimer: null,
     }
     this.mounts.set(slot, mount)
     this.watchAdoptedContent(slot, mount)
+  }
+
+  /**
+   * Nudge a plugin into rendering its main UI, if the user configured a way to do it.
+   *
+   * Some plugins only build `#<pid>_lsp_main` when their toggle model or command runs, so there is
+   * nothing to adopt until something invokes it. That same toggle is why this is rate-limited rather
+   * than retried: poking twice in a row would close the view we just opened.
+   *
+   * Returns whether the invocation actually went out, so a caller tracking "already tried" does not
+   * burn its one attempt on a call the cooldown swallowed.
+   */
+  private poke(pid: string): boolean {
+    const target = parseAdoptPokes(this.store.current().adoptPoke).get(pid)
+    if (target === undefined) return false
+
+    const now = Date.now()
+    const last = this.pokedAt.get(pid)
+    if (last !== undefined && now - last < POKE_COOLDOWN_MS) return false
+    this.pokedAt.set(pid, now)
+
+    void logseq.App.invokeExternalPlugin(`${pid}.${target}`).catch(() => {
+      // No error channel: a missing model or command resolves exactly like a present one, and the
+      // main UI showing up (or not) is the only answer we get.
+    })
+    return true
   }
 
   /**
@@ -556,6 +766,13 @@ export class Dock {
         }
         if (!graced && Date.now() < deadline) continue
 
+        // Empty past the reboot grace: a plugin that only renders once toggled looks exactly like
+        // this, so spend the mount's single poke here before settling on the diagnosis. If it works,
+        // the next tick sees content and clears the overlay again. The flag is consumed only when
+        // the invocation actually went out — a poke the cooldown swallowed was never an attempt, and
+        // burning the mount's one chance on it would strand the view for as long as it stays docked.
+        if (!mount.poked && this.poke(mount.pid)) mount.poked = true
+
         graced = true
         renderOverlay(
           mount.slotEl,
@@ -574,9 +791,10 @@ export class Dock {
     const slotEl = this.slotElement(root, slot)
     if (slotEl === null) return
 
-    const views = this.effectiveViews()
-    const pid = slot === 'top' ? views.viewTop : views.viewBottom
-    if (pid === NO_VIEW) return
+    // Reclaim only exists for evicted embed mounts, so anything but a plugin selection is a no-op.
+    const spec = this.specs()[slot]
+    if (spec.kind !== 'plugin') return
+    const pid = spec.pid
 
     const previous = this.takeMount(slot)
     if (await this.probeEmbed(slotEl, pid, this.strategies.budgetMs(pid))) {
@@ -609,6 +827,12 @@ export class Dock {
   /** Hand a detached mount back: adopted nodes to the host body, providers an `embedUnmount`. */
   private releaseMount(doc: Document, mount: SlotMount | undefined, reason: ClearReason): void {
     if (mount === undefined) return
+    if (mount.strategy === 'macro') {
+      // Deliberately unlike the embed branch's wipe exception: injected UI cannot outlive the
+      // element it was injected into, so there is no "keep it mounted" case to preserve.
+      if (mount.node !== null) dropMacroWrapper(mount.node)
+      return
+    }
     if (mount.strategy === 'embed') {
       // Host rule 5, and rule 3's exception: a wiped slot is coming back, so keep the provider mounted.
       if (reason !== 'wipe') invokeEmbedModel(mount.pid, 'embedUnmount', mount.slotEl.id, this.pluginId)
@@ -637,7 +861,11 @@ export class Dock {
    */
   private dropInvalidatedMounts(changedPid: string | null): void {
     for (const [slot, mount] of [...this.mounts]) {
-      if (!droppedByLifecycle(mount, changedPid)) continue
+      // Macro mounts belong to no plugin, so the protocol-pure rule below has nothing to say about
+      // them; they heal through their own health check on the assert this event triggers anyway.
+      const strategy = mount.strategy
+      if (strategy === 'macro') continue
+      if (!droppedByLifecycle({ pid: mount.pid, strategy }, changedPid)) continue
       // Record first: takeMount silences the slot watcher, so the purge below can never read as an
       // eviction. The purge only touches the dropped mount's own pid, keeping the scoping honest.
       this.takeMount(slot)
@@ -806,6 +1034,11 @@ export class Dock {
       // Dropping mounts is the dangerous half and stays scoped to the plugin that actually changed.
       this.strategies.invalidate(changedPid ?? undefined)
       this.dropInvalidatedMounts(changedPid)
+      // A plugin that just arrived may answer a macro nobody answered before; macro responders are
+      // anonymous to us, so every such verdict goes. The poke episode is attributable, so only the
+      // plugin the event is about gets another attempt at building its main UI.
+      this.unansweredMacros.clear()
+      if (changedPid !== null) this.pokedWhileMissing.delete(changedPid)
       this.onPluginsChanged?.()
       void this.assert()
     })
@@ -879,9 +1112,30 @@ function invokeEmbedModel(
   })
 }
 
-/** Remove our own children from a slot, never anything a provider owns (host rule 6). */
-function clearHostChildren(slotEl: HTMLElement): void {
+/**
+ * Take a macro wrapper down the way the host takes its own macro slots down: every injected-UI
+ * descendant is handed to `_forceCleanInjectedUI` before the element goes. Detaching the node alone
+ * would strand the libs-side teardown closure for the rest of the session.
+ *
+ * Takes a bare element rather than a mount record so it can also reap a wrapper left behind by a
+ * previous instance of this plugin, which no record of ours describes.
+ */
+function dropMacroWrapper(wrapper: Element): void {
+  runQuietly(() => {
+    for (const el of wrapper.querySelectorAll<HTMLElement>(INJECTED_UI_SELECTOR)) {
+      forceCleanInjectedUi(el.dataset.injectedUi ?? '')
+    }
+    wrapper.remove()
+  })
+}
+
+/**
+ * Remove our own children from a slot, never anything a provider owns (host rule 6). `keep` spares
+ * one node we are in the middle of filling — see {@link Dock.mountMacro}.
+ */
+function clearHostChildren(slotEl: HTMLElement, keep: Element | null = null): void {
   for (const child of [...slotEl.children]) {
+    if (child === keep) continue
     if (child.hasAttribute(EMBED_OWNER_ATTR)) continue
     child.remove()
   }

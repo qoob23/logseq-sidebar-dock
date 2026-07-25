@@ -83,7 +83,12 @@ Rules:
 5. **Unmount best-effort**: call `embedUnmount` when the user deselects the view or the host
    unloads. Providers must survive missing this call (host crash, forced reload).
 6. **Hands off the subtree**: never move, edit, or restyle anything inside
-   `[data-embed-owner]`. Hiding via the slot/ancestors is allowed.
+   `[data-embed-owner]`. Hiding via the slot/ancestors is allowed. One carve-out: the host SHOULD
+   give the slot a *neutral environment* by undoing the host app's own element-level bleed (e.g.
+   Logseq's `iframe { width: 100%; margin: 1rem 0 }` in `common.css`) — at no more than the slot
+   selector's own specificity (`:where()`), so any scoped rule the provider writes still wins.
+   Providers may therefore assume an unstyled-iframe baseline but keep full authority via their
+   own classed rules.
 7. **Success detection** (discovery doubles as this): after `embedMount`, poll the slot for a
    `[data-embed-owner="<provider-pid>"]` child with backoff. `invokeExternalPlugin` resolves
    `undefined` regardless of outcome, so the DOM is the only acknowledgment channel.

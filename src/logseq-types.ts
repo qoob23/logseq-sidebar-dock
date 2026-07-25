@@ -154,6 +154,67 @@ export function subscribeHostPluginLifecycle(
   }
 }
 
+/**
+ * `LSPluginCore.hookApp` — the host's own plugin-hook broadcast. With no `pid` it goes to every
+ * enabled plugin that installed the hook, which is exactly what a real macro render does.
+ */
+interface HookAppLike {
+  hookApp: (type: string, payload?: unknown, pid?: string) => unknown
+}
+
+function asHookApp(value: unknown): HookAppLike | null {
+  if (typeof value !== 'object' || value === null) return null
+  if (!('hookApp' in value) || typeof value.hookApp !== 'function') return null
+  return value as HookAppLike
+}
+
+/**
+ * Emit a host app hook. Used to re-emit `macro-renderer-slotted` for a slot we own (see `macro.ts`).
+ *
+ * Returns whether the call was actually made — a `false` means the bridge is unreachable and no
+ * amount of retrying will help. The call itself is async with no useful result: like every other
+ * plugin RPC here, the DOM is the only acknowledgment channel, so the promise is swallowed rather
+ * than left to float.
+ */
+export function emitHostAppHook(type: string, payload: unknown): boolean {
+  const host = getHostWindow()
+  if (host === null) return false
+  try {
+    const core = asHookApp(host.LSPluginCore)
+    if (core === null) return false
+    const result: unknown = core.hookApp(type, payload)
+    void Promise.resolve(result).catch(() => {
+      // Nothing to do: a hook nobody handles is indistinguishable from one that succeeded.
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * `LSPluginCore._forceCleanInjectedUI` — the host's own teardown for one injected-UI element.
+ *
+ * The host runs exactly this for every `[data-injected-ui]` descendant when it unmounts a macro slot.
+ * Removing our wrapper without it would leave the libs-side `injectedUIEffects` teardown closure
+ * behind for good, so we mirror the host instead of just detaching the node.
+ */
+export function forceCleanInjectedUi(id: string): boolean {
+  if (id === '') return false
+  const host = getHostWindow()
+  if (host === null) return false
+  try {
+    const core: unknown = host.LSPluginCore
+    if (typeof core !== 'object' || core === null) return false
+    if (!('_forceCleanInjectedUI' in core) || typeof core._forceCleanInjectedUI !== 'function') return false
+    const clean = core as { _forceCleanInjectedUI: (id: string) => unknown }
+    clean._forceCleanInjectedUI(id)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Ids of every plugin the host has registered, excluding `selfId`. */
 export function getInstalledPluginIds(selfId: string): string[] {
   const host = getHostWindow()

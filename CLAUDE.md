@@ -14,10 +14,13 @@ them**. Plain **TypeScript**. Target is the **0.10.x Markdown/file graph**, NOT 
 - `src/main.ts` — entry: settings schema (re-published on plugin-registry events), `provideModel`
   handlers for the tab and Reclaim buttons, echo wiring, `beforeunload`.
 - `src/dock.ts` — every host seam: `provideUI` injection + re-assertion, divider drag, drag
-  passthrough, slot mounting (embed protocol → main-UI adoption → placeholder), host-document
-  cleanup handle.
+  passthrough, slot mounting (per-slot spec: macro conjuring, or embed protocol → main-UI adoption →
+  placeholder; poke-then-adopt for lazy main UIs), host-document cleanup handle.
 - `src/embed.ts` — **pure** Embed Protocol v1 host logic (see `docs/embed-protocol.md`): payloads,
   slot ids, wipe-vs-eviction discriminator, strategy cache, "is this main UI empty?" predicate.
+- `src/macro.ts` — **pure** macro-slot logic: `{{renderer …}}` spec parsing, wrapper slot ids, the
+  `macro-renderer-slotted` hook payload (emitted host-side via `LSPluginCore.hookApp`, mirroring the
+  host's own `hook-ui-slot`).
 - `src/styles.ts` — **pure** builder for the whole keyed `provideStyle` sheet: mode, slot layout,
   segmented control, hosted-view `!important` overrides.
 - `src/settings.ts` / `src/divider.ts` — **pure** settings normalization + override store, and divider

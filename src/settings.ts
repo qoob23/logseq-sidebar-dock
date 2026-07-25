@@ -6,6 +6,8 @@
  * host-echoed values as a base plus an in-memory override layer that wins until the echo agrees.
  */
 
+import { parseMacroSpec } from './macro'
+
 /** Sentinel value for "no plugin view selected in this slot". */
 export const NO_VIEW = 'none'
 
@@ -24,6 +26,12 @@ export interface DockSettings {
   viewTop: string
   /** Plugin id hosted in the bottom slot, or {@link NO_VIEW}. */
   viewBottom: string
+  /** Renderer macro filling the top slot; non-blank OVERRIDES {@link DockSettings.viewTop}. */
+  macroTop: string
+  /** Renderer macro filling the bottom slot; non-blank OVERRIDES {@link DockSettings.viewBottom}. */
+  macroBottom: string
+  /** `pid = models.key` entries, `;`/newline separated — see {@link parseAdoptPokes}. */
+  adoptPoke: string
   /** Share (%) of the dock height given to the top slot. */
   splitPct: number
 }
@@ -32,10 +40,21 @@ export const DEFAULT_SETTINGS: DockSettings = {
   mode: 'nav',
   viewTop: NO_VIEW,
   viewBottom: NO_VIEW,
+  macroTop: '',
+  macroBottom: '',
+  adoptPoke: '',
   splitPct: 50,
 }
 
-const SETTINGS_KEYS = ['mode', 'viewTop', 'viewBottom', 'splitPct'] as const
+const SETTINGS_KEYS = [
+  'mode',
+  'viewTop',
+  'viewBottom',
+  'macroTop',
+  'macroBottom',
+  'adoptPoke',
+  'splitPct',
+] as const
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -97,6 +116,9 @@ export function normalizeSettings(raw: unknown): DockSettings {
     mode: readMode(source),
     viewTop: readString(source, 'viewTop', DEFAULT_SETTINGS.viewTop),
     viewBottom: readString(source, 'viewBottom', DEFAULT_SETTINGS.viewBottom),
+    macroTop: readString(source, 'macroTop', DEFAULT_SETTINGS.macroTop),
+    macroBottom: readString(source, 'macroBottom', DEFAULT_SETTINGS.macroBottom),
+    adoptPoke: readString(source, 'adoptPoke', DEFAULT_SETTINGS.adoptPoke),
     splitPct: readNumber(source, 'splitPct', DEFAULT_SETTINGS.splitPct, SPLIT_MIN, SPLIT_MAX),
   }
 }
@@ -115,6 +137,11 @@ function normalizePatch(patch: Partial<DockSettings>): Partial<DockSettings> {
     const id = cleanId(patch.viewBottom)
     if (id !== null) out.viewBottom = id
   }
+  // Free-text fields, unlike the plugin selections above: blank is a legitimate value ("no macro",
+  // "no pokes"), so a cleared field must survive as '' instead of being dropped as "no change".
+  if (patch.macroTop !== undefined) out.macroTop = patch.macroTop.trim()
+  if (patch.macroBottom !== undefined) out.macroBottom = patch.macroBottom.trim()
+  if (patch.adoptPoke !== undefined) out.adoptPoke = patch.adoptPoke.trim()
   if (patch.splitPct !== undefined && Number.isFinite(patch.splitPct)) {
     out.splitPct = round2(clamp(patch.splitPct, SPLIT_MIN, SPLIT_MAX))
   }
@@ -124,6 +151,110 @@ function normalizePatch(patch: Partial<DockSettings>): Partial<DockSettings> {
 /** True when the two settings objects differ in any field. */
 export function settingsDiffer(a: DockSettings, b: DockSettings): boolean {
   return SETTINGS_KEYS.some((key) => a[key] !== b[key])
+}
+
+/** What one slot is asked to show, after the macro/plugin precedence has been applied. */
+export type ViewSpec =
+  /** Nothing configured — the slot carries the "pick a view" placeholder. */
+  | { kind: 'none' }
+  /** A plugin's view, mounted through the embed protocol or by adopting its main UI. */
+  | { kind: 'plugin'; pid: string }
+  /** A renderer macro, mounted by re-emitting the host's own macro hook. */
+  | { kind: 'macro'; raw: string; args: readonly string[] }
+  /**
+   * A non-blank macro spec that parses to nothing. Kept distinct from `none` on purpose: silently
+   * falling back to the plugin selection would hide the typo the user needs to see.
+   */
+  | { kind: 'invalid-macro'; raw: string }
+
+/** The resolved spec of each slot. Indexable by `SlotName`. */
+export interface SlotSpecs {
+  top: ViewSpec
+  bottom: ViewSpec
+}
+
+/** A configured macro wins over the slot's plugin selection; nothing configured is `none`. */
+function resolveSlot(macro: string, pid: string): ViewSpec {
+  const raw = macro.trim()
+  if (raw !== '') {
+    const args = parseMacroSpec(raw)
+    return args === null ? { kind: 'invalid-macro', raw } : { kind: 'macro', raw, args }
+  }
+  return pid === NO_VIEW ? { kind: 'none' } : { kind: 'plugin', pid }
+}
+
+/**
+ * The selections as the DOM will actually realise them.
+ *
+ * One plugin's view is a single instance, so the same pid picked twice only fills the top slot — the
+ * stylesheet and the mounting code have to agree on that, or the layout would keep a slot open for a
+ * view that can never arrive. Macros carry no such restriction: two slots may render the same macro,
+ * since each gets its own injected copy.
+ */
+export function resolveSlotSpecs(settings: DockSettings): SlotSpecs {
+  const top = resolveSlot(settings.macroTop, settings.viewTop)
+  const bottom = resolveSlot(settings.macroBottom, settings.viewBottom)
+  if (top.kind === 'plugin' && bottom.kind === 'plugin' && top.pid === bottom.pid) {
+    return { top, bottom: { kind: 'none' } }
+  }
+  return { top, bottom }
+}
+
+function specSignature(spec: ViewSpec): string {
+  switch (spec.kind) {
+    case 'none':
+      return 'none'
+    case 'plugin':
+      return `plugin:${spec.pid}`
+    case 'macro':
+      return `macro:${spec.raw}`
+    case 'invalid-macro':
+      return `invalid-macro:${spec.raw}`
+  }
+}
+
+/**
+ * Signature of everything that decides what each slot renders and which plugin may be poked.
+ *
+ * The dock remembers per-episode verdicts — "already poked this plugin while its view was missing",
+ * "nobody ever answered this macro" — that must not outlive the configuration they were formed
+ * under. Comparing this signature drops them exactly when they stop being trustworthy and no more
+ * often: it is built from the PARSED poke map, so reformatting that field (or deleting a junk entry
+ * that never parsed anyway) changes nothing, and it is order-independent for the same reason.
+ */
+export function configSignature(adoptPoke: string, specs: SlotSpecs): string {
+  const pokes = [...parseAdoptPokes(adoptPoke)].map(([pid, target]) => `${pid}=${target}`).sort()
+  return [specSignature(specs.top), specSignature(specs.bottom), ...pokes].join('|')
+}
+
+/** Model/command groups `invokeExternalPlugin` can address. */
+const POKE_GROUPS: readonly string[] = ['models', 'commands']
+
+/**
+ * Parse the adopt-poke configuration: `pid = models.someKey; other-pid = commands.some-key`,
+ * separated by `;` or newlines.
+ *
+ * Some plugins only build their main UI once their toggle model or command has run, so there is
+ * nothing to adopt until something invokes it. The value is the `invokeExternalPlugin` path suffix,
+ * so only the two groups it understands are accepted — a malformed entry is dropped rather than
+ * guessed at, since a wrong invocation lands in someone else's plugin.
+ */
+export function parseAdoptPokes(raw: string): ReadonlyMap<string, string> {
+  const pokes = new Map<string, string>()
+  for (const entry of raw.split(/[;\n]/)) {
+    const eq = entry.indexOf('=')
+    if (eq === -1) continue
+    const pid = entry.slice(0, eq).trim()
+    const target = entry.slice(eq + 1).trim()
+    const dot = target.indexOf('.')
+    if (pid === '' || dot === -1) continue
+
+    const group = target.slice(0, dot)
+    const key = target.slice(dot + 1).trim()
+    if (!POKE_GROUPS.includes(group) || key === '') continue
+    pokes.set(pid, `${group}.${key}`)
+  }
+  return pokes
 }
 
 /**

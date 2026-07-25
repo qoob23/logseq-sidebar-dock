@@ -59,6 +59,37 @@ function main(): void {
         enumPicker: 'select',
       },
       {
+        key: 'macroTop',
+        type: 'string',
+        default: settings.macroTop,
+        title: 'Top macro',
+        description:
+          'Renderer macro to show in the upper slot, e.g. `{{renderer :pomodoro-timer}}` (the bare ' +
+          '`:pomodoro-timer` works too). OVERRIDES "Top view" while it is set. Macros that only ' +
+          'render are supported; ones that write back to their block are not, as there is no block. ' +
+          'The same macro in both slots only works if its plugin keys its UI by slot.',
+      },
+      {
+        key: 'macroBottom',
+        type: 'string',
+        default: settings.macroBottom,
+        title: 'Bottom macro',
+        description:
+          'Renderer macro to show in the lower slot, e.g. `{{renderer :pomodoro-timer}}`. OVERRIDES ' +
+          '"Bottom view" while it is set. Same limitations: render-only macros, no block writes, and ' +
+          'the same macro in both slots only works if its plugin keys its UI by slot.',
+      },
+      {
+        key: 'adoptPoke',
+        type: 'string',
+        default: settings.adoptPoke,
+        title: 'Poke before docking',
+        description:
+          'For plugins that build their view only when toggled: `plugin-id = models.key; other-id = ' +
+          'commands.key` (`;` or newline separated). The listed model/command is invoked to coax the ' +
+          'plugin into rendering its main UI, at most once every few seconds per plugin.',
+      },
+      {
         key: 'splitPct',
         type: 'number',
         default: settings.splitPct,

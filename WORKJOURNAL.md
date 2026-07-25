@@ -24,6 +24,25 @@
     - Adopted plugins with an empty main document get a reversible diagnostic overlay (no undock → no reload).
 - Slot layout now derives from configured views: one view → full-height slot, none → lone placeholder slot;
   divider hidden (inert) outside the two-view layout; `splitPct` preserved untouched.
+- Two render paths for non-protocol plugins, host mechanics verified against the og source first:
+    - **Macro slots** (`macroTop`/`macroBottom`, override the slot's plugin pick): impersonate the host's
+      `hook-ui-slot` — own wrapper div, `LSPluginCore.hookApp('macro-renderer-slotted')` re-emitted with backoff
+      (a broadcast before the provider installs its hook is dropped; the host itself re-emits every render).
+    - Wrapper teardown mirrors the host: `_forceCleanInjectedUI` per injected element before removal (plain
+      removal leaks the libs-side teardown closure); stale same-id wrappers from a crashed life reaped pre-mount.
+    - Specs nobody answered re-probe on the short budget (asserts serialize — a missing provider must not stall
+      each one 6s); hook `uuid` sent empty: render-only macros work, block-writing ones are out of scope.
+    - **Poke-then-adopt** (`adoptPoke`: `pid = models.key` / `commands.key`): `invokeExternalPlugin` coaxes
+      plugins that only build `_lsp_main` once toggled. Flap-proof: once per missing episode + once per adopted
+      mount + 5s cooldown, counting only pokes that fired; `configSignature` over the PARSED config (order- and
+      format-insensitive) retires both memories on real edits only.
+    - Slot specs resolve macro > plugin > none; an invalid macro keeps its slot (own placeholder), never a
+      silent fallback; blank patches must clear the new string settings (unlike the view enums).
+- Debugged "synapses shifted 16px down, clipped at bottom" in the full-height slot: dock geometry measured
+  exact; culprit is Logseq's own `iframe { width:100%; margin:1rem 0 }` (common.css) bleeding into the frame.
+    - **Decision — the dock neutralizes host-app bleed; provider CSS stays theirs**: `.sdock-slot
+      :where(iframe) { margin: 0 }` at bare slot specificity, so any scoped provider rule outranks it and
+      wanted margins survive. Protocol host rule 6 gains the matching neutral-environment carve-out.
 - Lifecycle drops now also purge the changed pid's `[data-embed-owner]` husk from the slot (record taken first,
   so the silenced watcher cannot misread the purge as an eviction): a crashed provider's husk would satisfy the
   next probe and be committed as a healthy dead pane never re-probed. Well-behaved providers sweep themselves on
