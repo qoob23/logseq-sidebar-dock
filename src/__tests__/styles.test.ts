@@ -194,6 +194,43 @@ describe('buildDockCss', () => {
   })
 })
 
+describe('buildDockCss — segmented control', () => {
+  const css = buildDockCss(OPTS)
+
+  it('styles the control by its own injected-container id, not the dock container', () => {
+    expect(css).toContain('#logseq-sidebar-dock--tabs {')
+    expect(ruleBlocks(css, '#logseq-sidebar-dock--tabs')[0] ?? '').toContain('display: flex')
+  })
+
+  it('escapes a leading digit in the container id, exactly like the dock container', () => {
+    expect(buildDockCss({ ...OPTS, pluginId: '9dock' })).toContain('#\\39 dock--tabs {')
+  })
+
+  it('sits in the header row without widening it, and outside the window drag region', () => {
+    const block = ruleBlocks(css, '.cp__header > .l > #logseq-sidebar-dock--tabs')[0] ?? ''
+    expect(block).toContain('flex: 1 1 0')
+    expect(ruleBlocks(css, '#logseq-sidebar-dock--tabs')[0] ?? '').toContain(
+      '-webkit-app-region: no-drag',
+    )
+  })
+
+  it('keeps a placement for the fallback row inside our own column', () => {
+    // dock.ts injects into the sidebar column when the header cell cannot be resolved.
+    expect(ruleBlocks(css, '#left-sidebar #logseq-sidebar-dock--tabs')[0] ?? '').toContain('order: -2')
+  })
+
+  it('hides itself while the sidebar it switches is closed', () => {
+    const block = ruleBlocks(css, 'main:not(.ls-left-sidebar-open) #logseq-sidebar-dock--tabs')[0] ?? ''
+    expect(block).toContain('display: none')
+  })
+
+  it('highlights the active segment wherever the control ended up', () => {
+    // Selector on the button alone — never scoped to a container, or the fallback row would lose it.
+    expect(css).toContain(".sdock-tab[data-tab='nav'] {")
+    expect(css).not.toContain("--tabs .sdock-tab[data-tab=")
+  })
+})
+
 describe('buildDockCss — macro slots', () => {
   // The rules are unconditional: a macro can only ever render inside our own wrapper, so scoping
   // them to the configured slot would buy nothing and would have to be rebuilt on every flip.
@@ -224,16 +261,15 @@ describe('buildDockCss — macro slots', () => {
 describe('buildDockCss — nav mode', () => {
   const css = buildDockCss(OPTS)
 
-  it('collapses the dock to its tabs and hides the slots', () => {
-    expect(css).toContain('#logseq-sidebar-dock--dock .sdock-root {\n  display: none;\n}')
-    expect(css).toContain('flex: 0 0 auto')
+  it('takes the dock out of the column entirely — the tabs no longer live in it', () => {
+    expect(css).toContain('#logseq-sidebar-dock--dock {\n  display: none;\n}')
   })
 
   it('leaves the stock navigation alone', () => {
     for (const sel of HOST_NAV_SELECTORS) expect(css).not.toContain(sel)
   })
 
-  it('highlights the Nav segment only', () => {
+  it('highlights the Navigation segment only', () => {
     expect(css).toContain(".sdock-tab[data-tab='nav'] {")
     expect(css).not.toContain(".sdock-tab[data-tab='views'] {")
   })
@@ -244,7 +280,7 @@ describe('buildDockCss — views mode', () => {
 
   it('gives the dock the whole column', () => {
     expect(css).toContain('flex: 1 1 auto;\n  min-height: 0;')
-    expect(css).not.toContain('#logseq-sidebar-dock--dock .sdock-root {\n  display: none;\n}')
+    expect(css).not.toContain('#logseq-sidebar-dock--dock {\n  display: none;\n}')
   })
 
   it('hides every stock navigation section', () => {
@@ -253,7 +289,7 @@ describe('buildDockCss — views mode', () => {
     expect(block.slice(0, block.indexOf('}'))).toContain('display: none !important')
   })
 
-  it('highlights the Views segment only', () => {
+  it('highlights the Plugins segment only', () => {
     expect(css).toContain(".sdock-tab[data-tab='views'] {")
     expect(css).not.toContain(".sdock-tab[data-tab='nav'] {")
   })

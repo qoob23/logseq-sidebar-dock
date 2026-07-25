@@ -1,7 +1,8 @@
 /**
- * Host-side machinery: injects the dock pane into the left sidebar, keeps it alive, and fills its two
- * slots — through the Embed Protocol v1 where the plugin supports it (`docs/embed-protocol.md`), and
- * by adopting the plugin's main-UI container where it does not.
+ * Host-side machinery: injects the dock pane into the left sidebar (and the segmented control into
+ * the app header's left cell), keeps both alive, and fills the dock's two slots — through the Embed
+ * Protocol v1 where the plugin supports it (`docs/embed-protocol.md`), and by adopting the plugin's
+ * main-UI container where it does not.
  *
  * Runs inside our own (un-sandboxed, same-origin) plugin iframe and reaches into the host document
  * through `window.top`. The host has NO lifecycle management for `path`-injected UI, so re-assertion
@@ -53,10 +54,18 @@ import { buildDockCss, splitVarFallback } from './styles'
 
 /** `provideUI` key — becomes the container id `#<pid>--dock`, so it must be a bare CSS ident. */
 const DOCK_KEY = 'dock'
+/** `provideUI` key of the segmented control — a second, independent injection (`#<pid>--tabs`). */
+const TABS_KEY = 'tabs'
 /** `provideStyle` key — the host looks it up with an UNQUOTED attribute selector: bare ident only. */
 const STYLE_KEY = 'sdock-layout'
 /** Append point: last child of the sidebar's flex column, after `footer.create`. */
 const DOCK_PATH = '#left-sidebar .left-sidebar-inner > .wrap'
+/**
+ * Preferred append point for the segmented control: the header's left cell, the row that already
+ * carries the sidebar toggle and the search button. It belongs to a different host component than
+ * the dock, hence a separate injection with its own health check — see {@link Dock.assertTabs}.
+ */
+const TABS_PATH = '.cp__header > .l'
 /** Toggled on our own container while a drag is in flight (see {@link Dock.installDragPassthrough}). */
 const DRAGGING_CLASS = 'sdock-dragging'
 
@@ -157,7 +166,23 @@ function sleep(ms: number): Promise<void> {
 /** Our container counts as healthy only when it is attached AND still holds our whole markup. */
 function isHealthy(el: HTMLElement | null): el is HTMLElement {
   if (el === null || !el.isConnected) return false
-  return el.querySelector('.sdock-tabs') !== null && el.querySelector('.sdock-root') !== null
+  return el.querySelector('.sdock-root') !== null
+}
+
+/**
+ * Where the segmented control goes. The header row is the home; our own column is the fallback for
+ * when the header markup shifts under us, so a renamed cell degrades the placement instead of
+ * losing the control altogether (the face is then only switchable from the settings).
+ */
+function tabsPath(doc: Document): string {
+  return doc.querySelector(TABS_PATH) === null ? DOCK_PATH : TABS_PATH
+}
+
+/** Intact AND standing in the row we want it in right now — the header cell may have arrived late. */
+function isTabsHealthy(doc: Document, tabsId: string): boolean {
+  const el = doc.getElementById(tabsId)
+  if (el === null || el.querySelector('.sdock-tabs') === null) return false
+  return el.parentElement === doc.querySelector(tabsPath(doc))
 }
 
 /**
@@ -173,10 +198,6 @@ function buildTemplate(pluginId: string): string {
     `<div class="sdock-slot" data-slot="${name}" id="${escapeAttribute(slotElementId(pluginId, name))}" ${EMBED_HOST_ATTR}="${host}"></div>`
 
   return [
-    '<div class="sdock-tabs">',
-    '<button class="sdock-tab" data-tab="nav" data-on-click="sdockShowNav">Nav</button>',
-    '<button class="sdock-tab" data-tab="views" data-on-click="sdockShowViews">Views</button>',
-    '</div>',
     '<div class="sdock-root">',
     slot('top'),
     '<div class="sdock-divider" title="Drag to resize"></div>',
@@ -185,11 +206,24 @@ function buildTemplate(pluginId: string): string {
   ].join('')
 }
 
+/**
+ * The segmented control, injected on its own so it can live in the header row (see {@link TABS_PATH}).
+ * The host binds its `data-on-click` delegation per injected container, so these buttons reach the
+ * same models from either placement.
+ */
+const TABS_TEMPLATE = [
+  '<div class="sdock-tabs">',
+  '<button class="sdock-tab" data-tab="nav" data-on-click="sdockShowNav">Navigation</button>',
+  '<button class="sdock-tab" data-tab="views" data-on-click="sdockShowViews">Plugins</button>',
+  '</div>',
+].join('')
+
 export class Dock {
   private readonly pluginId: string
   private readonly store: SettingsStore
   private readonly onPluginsChanged: (() => void) | null
   private readonly containerId: string
+  private readonly tabsId: string
   private readonly template: string
   private readonly mounts = new Map<SlotName, SlotMount>()
   private readonly strategies = new StrategyCache()
@@ -220,6 +254,7 @@ export class Dock {
     this.store = store
     this.onPluginsChanged = onPluginsChanged ?? null
     this.containerId = `${pluginId}--${DOCK_KEY}`
+    this.tabsId = `${pluginId}--${TABS_KEY}`
     this.template = buildTemplate(pluginId)
   }
 
@@ -289,6 +324,7 @@ export class Dock {
     const cleanup = takeHostCleanup(doc)
     if (cleanup !== null) runQuietly(cleanup)
     doc.getElementById(this.containerId)?.remove()
+    doc.getElementById(this.tabsId)?.remove()
   }
 
   private async runAssert(): Promise<void> {
@@ -298,6 +334,7 @@ export class Dock {
     // Any assert supersedes a pending missing-view watch and the split it was built for.
     const generation = ++this.watchGeneration
     this.provideStyle()
+    this.assertTabs(doc)
 
     // Missing, detached, or emptied by a third party — all heal the same way. Re-calling `provideUI`
     // with the same key rewrites the container's innerHTML, so rescue adopted nodes first.
@@ -414,6 +451,39 @@ export class Dock {
 
   private inject(): void {
     logseq.provideUI({ key: DOCK_KEY, path: DOCK_PATH, template: this.template })
+  }
+
+  /**
+   * Keep the segmented control injected, in the row we currently want it in.
+   *
+   * Nothing waits on it — no view mounts here — so this stays synchronous; a header that has not
+   * rendered yet is picked up by the container observer, which watches this too.
+   *
+   * `setupInjectedUI` only rewrites an EXISTING container's innerHTML and never moves it, so a
+   * container left in the fallback row has to be torn down before the re-injection can place it in
+   * the header cell. That is what makes the placement heal when the header turns up after our first
+   * assert. The host's own teardown goes first (it also retires the libs-side effect), but its
+   * verdict is about the CALL, not the node — and it removes the node from the parent it was created
+   * under, which is exactly the parent that is wrong here — so the node itself is the only thing
+   * worth believing: still standing means removing it by hand, or we would re-inject into a
+   * container the host can neither move nor replace and never converge.
+   */
+  private assertTabs(doc: Document): void {
+    if (isTabsHealthy(doc, this.tabsId)) return
+    const path = tabsPath(doc)
+    const target = doc.querySelector(path)
+    if (target === null) return
+
+    const el = doc.getElementById(this.tabsId)
+    if (el !== null && el.parentElement !== target) {
+      forceCleanInjectedUi(this.tabsId)
+      if (doc.getElementById(this.tabsId) !== null) {
+        runQuietly(() => {
+          el.remove()
+        })
+      }
+    }
+    logseq.provideUI({ key: TABS_KEY, path, template: TABS_TEMPLATE })
   }
 
   /** `provideUI` is fire-and-forget over postMessage — poll for the node with a backoff. */
@@ -1015,7 +1085,11 @@ export class Dock {
       timer = setTimeout(() => {
         timer = null
         if (this.disposed) return
-        if (!isHealthy(doc.getElementById(this.containerId))) void this.assert()
+        // Two independent injections in two different host subtrees: either one going down (or the
+        // header cell finally showing up) is a reason to re-assert.
+        if (!isHealthy(doc.getElementById(this.containerId)) || !isTabsHealthy(doc, this.tabsId)) {
+          void this.assert()
+        }
       }, OBSERVER_DEBOUNCE_MS)
     })
     observer.observe(target, { childList: true, subtree: true })

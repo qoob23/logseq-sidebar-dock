@@ -5,9 +5,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `logseq-sidebar-dock` — a **Logseq** plugin that gives the **LEFT sidebar** two faces, switched by a
-segmented **Nav / Views** control injected at the top of the sidebar: the stock navigation, or a **dock**
-filling the whole sidebar with **two user-selectable plugin views** and a **user-adjustable divider between
-them**. Plain **TypeScript**. Target is the **0.10.x Markdown/file graph**, NOT the DB version.
+segmented **Navigation / Plugins** control (labels only — the persisted mode values stay `nav` / `views`):
+the stock navigation, or a **dock** filling the whole sidebar with **two user-selectable plugin views** and
+a **user-adjustable divider between them**. Plain **TypeScript**. Target is the **0.10.x Markdown/file
+graph**, NOT the DB version.
+
+The control is its **own `provideUI` injection** (`#<pid>--tabs`), landing in the app header's left cell
+(`.cp__header > .l` — the row that already carries the sidebar toggle and the search button) and falling
+back to the top of the sidebar column when that cell cannot be resolved. Two injections in two host
+subtrees, so both are health-checked and re-asserted independently.
 
 ## Source layout (implemented)
 

@@ -132,12 +132,9 @@ ${sel} iframe {
  */
 function modeRules(dockId: string, mode: DockMode): string {
   if (mode === 'nav') {
-    return `/* nav mode: the stock navigation owns the column, the dock shrinks to its tabs. */
+    return `/* nav mode: the stock navigation owns the column and the dock steps out of it entirely.
+   The segmented control is injected separately (header row), so nothing here has to stay visible. */
 ${dockId} {
-  flex: 0 0 auto;
-}
-
-${dockId} .sdock-root {
   display: none;
 }`
   }
@@ -158,6 +155,7 @@ ${dockId} {
 /** The complete stylesheet for the keyed `provideStyle` sheet. */
 export function buildDockCss(opts: DockCssOptions): string {
   const dockId = `#${escapeIdent(opts.pluginId)}--dock`
+  const tabsId = `#${escapeIdent(opts.pluginId)}--tabs`
   // Only an adopted plugin main UI needs the `!important` cage; a macro renders into our own wrapper.
   const pids = [opts.viewTop, opts.viewBottom].flatMap((spec) =>
     spec.kind === 'plugin' ? [spec.pid] : [],
@@ -186,12 +184,41 @@ ${dockId} {
 
 ${modeRules(dockId, opts.mode)}
 
+/* The segmented control rides in the app header's left cell — the row that already carries the
+   sidebar toggle and the search button — so it has to sit in that row's flex line, stay out of the
+   window drag region, and ignore the outsized font-size the header sets on itself. */
+${tabsId} {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  font-size: 12px;
+  -webkit-app-region: no-drag;
+}
+
+.cp__header > .l > ${tabsId} {
+  /* Basis 0: take the room the header cell has left over instead of widening it. */
+  flex: 1 1 0;
+  padding: 0 8px 0 6px;
+}
+
+/* Fallback placement (dock.ts: the header cell is gone) — back to the top of our own column. */
+#left-sidebar ${tabsId} {
+  order: -2;
+  flex: 0 0 auto;
+  padding: 2px 8px 6px;
+}
+
+/* It switches the left sidebar's face; with the sidebar closed there is no face to switch. */
+main:not(.ls-left-sidebar-open) ${tabsId} {
+  display: none;
+}
+
 /* Segmented control: rounded track, active segment raised as a chip. */
 .sdock-tabs {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   gap: 2px;
-  margin: 2px 8px 6px;
   padding: 2px;
   border-radius: var(--ls-border-radius-medium, 8px);
   background: var(--ls-tertiary-background-color, rgba(127, 127, 127, 0.14));
@@ -210,6 +237,11 @@ ${modeRules(dockId, opts.mode)}
   font-weight: 500;
   line-height: 18px;
   text-align: center;
+  /* The header cell is only as wide as the sidebar, which the user can drag narrow: clip the label
+     rather than let it spill over the search button. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
   user-select: none;
   opacity: 0.75;
@@ -227,7 +259,7 @@ ${modeRules(dockId, opts.mode)}
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
 }
 
-/* Sits below the tabs and takes whatever height the mode left for it. */
+/* Fills the container, which the mode rules size. */
 .sdock-root {
   display: flex;
   flex-direction: column;

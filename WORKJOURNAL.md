@@ -43,6 +43,18 @@
     - **Decision — the dock neutralizes host-app bleed; provider CSS stays theirs**: `.sdock-slot
       :where(iframe) { margin: 0 }` at bare slot specificity, so any scoped provider rule outranks it and
       wanted margins survive. Protocol host rule 6 gains the matching neutral-environment carve-out.
+- Segmented control moved out of the dock container into the app header's left cell (`.cp__header > .l` — the
+  row already carrying the sidebar toggle and search button), as its own `provideUI` key `tabs`.
+    - **Decision — a second injection, not CSS repositioning**: the two rows belong to different host components,
+      so each gets its own health check and re-assert; a missing header cell falls back to the sidebar column.
+    - `setupInjectedUI` only rewrites an existing `#<id>`'s innerHTML and never moves it, so a misplaced container
+      is force-cleaned AND then removed by hand — its host teardown targets the creation-time parent and its
+      return value describes the call, not the node; believing it would leave the placement stuck forever.
+    - Nav mode hides the whole dock container now that the tabs left it; `-webkit-app-region: no-drag` is
+      load-bearing (the header is a drag region, host exempts only `a`/`svg`/`button`), and the control hides
+      itself via `main:not(.ls-left-sidebar-open)` — a closed sidebar has no face to switch.
+- Tab labels renamed Nav → Navigation, Views → Plugins (labels only: persisted mode values stay `nav`/`views`);
+  they ellipsize, since the header cell is only as wide as the user's sidebar.
 - Lifecycle drops now also purge the changed pid's `[data-embed-owner]` husk from the slot (record taken first,
   so the silenced watcher cannot misread the purge as an eviction): a crashed provider's husk would satisfy the
   next probe and be committed as a healthy dead pane never re-probed. Well-behaved providers sweep themselves on

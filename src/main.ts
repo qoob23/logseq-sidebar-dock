@@ -36,7 +36,8 @@ function main(): void {
         type: 'enum',
         default: settings.mode,
         title: 'Sidebar face',
-        description: 'Which face the sidebar shows. The Nav/Views control at the top of the sidebar sets this too.',
+        description:
+          'Which face the sidebar shows. The Navigation/Plugins control next to the search button sets this too.',
         enumChoices: [...DOCK_MODES],
         enumPicker: 'radio',
       },

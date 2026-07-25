@@ -1,14 +1,15 @@
 # Sidebar Dock (`logseq-sidebar-dock`)
 
 A Logseq **0.10.x** (Markdown/file graph) plugin that gives the **left sidebar** two faces, picked with a
-segmented **Nav / Views** control pinned at the top of the sidebar:
+segmented **Navigation / Plugins** control that sits in the app header, on the same row as the search
+button:
 
-- **Nav** — the stock navigation, full height, exactly as Logseq ships it.
-- **Views** — the stock navigation steps aside and a **dock** fills the whole sidebar, hosting **two
+- **Navigation** — the stock navigation, full height, exactly as Logseq ships it.
+- **Plugins** — the stock navigation steps aside and a **dock** fills the whole sidebar, hosting **two
   user-selectable plugin views** with a **draggable divider** between them.
 
 Switching faces is a stylesheet swap, so a docked view is only hidden, never unmounted — iframes keep
-running (and keep their scroll position and state) while you are on the Nav face.
+running (and keep their scroll position and state) while you are on the Navigation face.
 
 ## How a view gets into a slot
 
@@ -66,8 +67,9 @@ Other scripts: `npm run typecheck`, `npm run lint` (`lint:fix`), `npm test`.
 
 ## Switch faces
 
-Click **Nav** or **Views** in the segmented control at the top of the left sidebar. The choice is
-persisted (it survives restarts) and is also editable as the **Sidebar face** setting.
+Click **Navigation** or **Plugins** in the segmented control in the header, next to the search button (it
+is hidden while the left sidebar is closed — there is no face to switch then). The choice is persisted (it
+survives restarts) and is also editable as the **Sidebar face** setting.
 
 ## Pick the two views
 
@@ -75,7 +77,7 @@ Plugins → **Sidebar Dock** → ⚙ **Settings**:
 
 | Setting | Meaning |
 |---|---|
-| **Sidebar face** | `nav` or `views` — same thing the segmented control sets. |
+| **Sidebar face** | `nav` or `views` — same thing the **Navigation** / **Plugins** control sets. |
 | **Top view** | Plugin shown in the upper slot (`none` = unconfigured). |
 | **Bottom view** | Plugin shown in the lower slot (`none` = unconfigured). |
 | **Divider position (%)** | Share of the dock given to the top view (15–85), when both slots are configured. Dragging the divider writes this. |
