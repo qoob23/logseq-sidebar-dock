@@ -24,3 +24,7 @@
     - Adopted plugins with an empty main document get a reversible diagnostic overlay (no undock → no reload).
 - Slot layout now derives from configured views: one view → full-height slot, none → lone placeholder slot;
   divider hidden (inert) outside the two-view layout; `splitPct` preserved untouched.
+- Lifecycle drops now also purge the changed pid's `[data-embed-owner]` husk from the slot (record taken first,
+  so the silenced watcher cannot misread the purge as an eviction): a crashed provider's husk would satisfy the
+  next probe and be committed as a healthy dead pane never re-probed. Well-behaved providers sweep themselves on
+  `beforeunload` (tag-cloud does); this covers the killed-outright case. Scoping unchanged — only the event's pid.

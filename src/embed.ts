@@ -79,9 +79,12 @@ export function probeBudgetMs(lastKnown: EmbedStrategy | null): number {
 /**
  * Which mount records a plugin-registry event invalidates.
  *
- * A reloaded or unloaded provider leaves a dead subtree behind that would otherwise be misread as an
- * eviction ("open in another surface"), so ITS embed mounts are dropped and re-established through the
- * normal probing path — invalidation, not the auto-remount-after-eviction host rule 4 forbids.
+ * A reloaded or unloaded provider either sweeps its subtree on the way out (a removal that would be
+ * misread as an eviction — "open in another surface") or, when killed outright, leaves a dead husk
+ * behind (which would satisfy the next probe and be committed as a healthy mount). Either way ITS
+ * embed mounts are dropped — and the husk purged, see `Dock.dropInvalidatedMounts` — then
+ * re-established through the normal probing path: invalidation, not the
+ * auto-remount-after-eviction host rule 4 forbids.
  *
  * Scoping to the plugin the event is about is what keeps that distinction honest: dropping every embed
  * record on any plugin's event would turn an unrelated install into a silent steal of a view the user

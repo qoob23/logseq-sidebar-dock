@@ -623,18 +623,27 @@ export class Dock {
   }
 
   /**
-   * Forget the embed mounts belonging to the plugin a registry event was about. That provider left a
-   * dead subtree behind, which would otherwise read as an eviction ("open in another surface" plus a
-   * Reclaim button the user should not have to press); the next assert re-establishes it through the
-   * normal probing path. No `embedUnmount`: the provider may be gone, and if it is not, `embedMount`
-   * is idempotent, so a live subtree is re-adopted on the probe's first check.
+   * Forget the embed mounts belonging to the plugin a registry event was about, and purge any dead
+   * subtree it left in the slot. A well-behaved provider sweeps its own subtrees in `beforeunload`,
+   * but a crashed or killed one cannot — and its husk would satisfy the next probe's
+   * `hasEmbedSubtree` check, committing a dead pane we would then believe healthy and never re-probe.
+   * With record and husk both gone, the next assert re-establishes the view through the normal
+   * probing path against a live provider only. No `embedUnmount`: the provider may be gone, and if it
+   * is not, `embedMount` is idempotent, so a live provider simply mounts fresh on the probe's first
+   * invoke.
    *
    * Strictly scoped by pid — see {@link droppedByLifecycle} for why an unrelated plugin's event must
    * never reach an evicted record.
    */
   private dropInvalidatedMounts(changedPid: string | null): void {
     for (const [slot, mount] of [...this.mounts]) {
-      if (droppedByLifecycle(mount, changedPid)) this.takeMount(slot)
+      if (!droppedByLifecycle(mount, changedPid)) continue
+      // Record first: takeMount silences the slot watcher, so the purge below can never read as an
+      // eviction. The purge only touches the dropped mount's own pid, keeping the scoping honest.
+      this.takeMount(slot)
+      runQuietly(() => {
+        for (const husk of mount.slotEl.querySelectorAll(embedOwnerSelector(mount.pid))) husk.remove()
+      })
     }
   }
 

@@ -46,6 +46,7 @@ describe('protocol addressing', () => {
   it('matches the provider subtree by owner attribute, quoting hostile ids', () => {
     expect(embedOwnerSelector('synapses')).toBe(`[${EMBED_OWNER_ATTR}="synapses"]`)
     expect(embedOwnerSelector('we"ird')).toBe(`[${EMBED_OWNER_ATTR}="we\\"ird"]`)
+    expect(embedOwnerSelector('back\\slash')).toBe(`[${EMBED_OWNER_ATTR}="back\\\\slash"]`)
   })
 
   it('escapes attribute values interpolated into the injected template', () => {
