@@ -43,7 +43,39 @@
     - **Decision — the dock neutralizes host-app bleed; provider CSS stays theirs**: `.sdock-slot
       :where(iframe) { margin: 0 }` at bare slot specificity, so any scoped provider rule outranks it and
       wanted margins survive. Protocol host rule 6 gains the matching neutral-environment carve-out.
+- Segmented control moved out of the dock container into the app header's left cell (`.cp__header > .l` — the
+  row already carrying the sidebar toggle and search button), as its own `provideUI` key `tabs`.
+    - **Decision — a second injection, not CSS repositioning**: the two rows belong to different host components,
+      so each gets its own health check and re-assert; a missing header cell falls back to the sidebar column.
+    - `setupInjectedUI` only rewrites an existing `#<id>`'s innerHTML and never moves it, so a misplaced container
+      is force-cleaned AND then removed by hand — its host teardown targets the creation-time parent and its
+      return value describes the call, not the node; believing it would leave the placement stuck forever.
+    - Nav mode hides the whole dock container now that the tabs left it; `-webkit-app-region: no-drag` is
+      load-bearing (the header is a drag region, host exempts only `a`/`svg`/`button`), and the control hides
+      itself via `main:not(.ls-left-sidebar-open)` — a closed sidebar has no face to switch.
+- Tab labels renamed Nav → Navigation, Views → Plugins (labels only: persisted mode values stay `nav`/`views`);
+  they ellipsize, since the header cell is only as wide as the user's sidebar.
+    - **Superseded by the layouts work**: with tabs now one-per-user-layout there is no "Plugins" face to name,
+      and the built-in tab is back to `Nav` — short, since it shares the row with N user-named tabs.
 - Lifecycle drops now also purge the changed pid's `[data-embed-owner]` husk from the slot (record taken first,
   so the silenced watcher cannot misread the purge as an eviction): a crashed provider's husk would satisfy the
   next probe and be committed as a healthy dead pane never re-probed. Well-behaved providers sweep themselves on
   `beforeunload` (tag-cloud does); this covers the killed-outright case. Scoping unchanged — only the event's pid.
+- Left sidebar can exceed the host's own 240–460px clamp: the host writes `--ls-left-sidebar-width` NON-important
+  inline on `<html>` and every consumer reads that one var, so an `!important` rule in our sheet is the whole
+  mechanism. New `sidebarWidthPx` setting (0 = follow host), driven by hijacking the host's `.left-sidebar-resizer`
+  in capture phase (its interact.js draggable binds on the document, bubble phase) with our own unclamped geometry.
+    - **Decision — one width for both faces**: built views-only, unscoped after testing. The dock width IS the
+      sidebar width: no main-content relayout on a face flip, and the host resizer is superseded, not half-masked
+      (left live on nav it could only write a clamped value this rule masks anyway).
+    - Gated on `html:has(main.ls-left-sidebar-open)` — the header's left cell takes `min-width:
+      var(--ls-left-sidebar-width)` unscoped, so a closed sidebar would hold the widened column in the header.
+    - Viewport reserve enforced TWICE, drag-time clamp and `min(…, calc(100vw - 200px))` in the rule, sharing one
+      constant: a width persisted on a big display otherwise swallows a small window with the handle off-screen.
+    - Drag start seeds an override so the `!important` rule exists for the transient `--sdock-width` to feed; a
+      click (no move) or an aborted drag reverts it — a phantom override no echo can agree with silently masks
+      later hand edits to the setting, since `settingsDiffer` compares post-override values.
+    - Hijack listeners sit on a HOST node outliving our module scope, so they belong in the host-cleanup handle:
+      a corpse's capture-phase `stopImmediatePropagation` otherwise blocks both the successor and the host itself.
+    - Host's `localStorage` width is never updated again while we are installed — uninstalling reverts to whatever
+      Logseq last remembered on its own, not the width in use.

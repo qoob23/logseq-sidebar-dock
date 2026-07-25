@@ -15,8 +15,9 @@
  */
 
 import { type ResolvedSlot, type SlotAxis } from './config'
-// The per-slot floor belongs to the drag geometry that has to honour it; this sheet only emits it.
-import { SLOT_MIN_PX } from './divider'
+// The per-slot floor and the viewport reserve belong to the drag geometry that has to honour them;
+// this sheet only emits them.
+import { SLOT_MIN_PX, VIEWPORT_RESERVE_PX } from './divider'
 
 /** One layout as the stylesheet (and the dock's DOM reconciler) needs to see it. */
 export interface ResolvedLayout {
@@ -33,6 +34,12 @@ export interface DockCssOptions {
   activeTab: string
   /** Every configured layout, in tab order. All of them get rules; one of them is visible. */
   layouts: readonly ResolvedLayout[]
+  /**
+   * Sidebar width (px) to force on EVERY tab, nav included; `0` leaves the host's own width alone.
+   * Global rather than per layout: the dock's width is the sidebar's width, so one remembered value is
+   * what keeps a tab flip from relayouting the main content behind it.
+   */
+  sidebarWidthPx: number
 }
 
 /** Thickness of a divider along the layout axis (its `flex-basis`). */
@@ -40,11 +47,12 @@ const DIVIDER_PX = 6
 
 /* ------------------------------------------------------------------ names both sides must spell alike
  *
- * A selector in this sheet and a DOM write in `dock.ts` are the two halves of every one of these, with
- * nothing in between that could notice them drifting apart: renaming a class on one side while the
- * other kept the old spelling typechecks, lints and passes every test, and then fails only in a live
- * Logseq — as sizing that stops applying, a nav face that will not hide, a drag the iframes swallow, or
- * an edit chrome that never appears.
+ * A selector in this sheet and a DOM write in `dock.ts` — or the `provideUI` path it injects into — are
+ * the two halves of every one of these, with nothing in between that could notice them drifting apart:
+ * renaming a class on one side while the other kept the old spelling typechecks, lints and passes every
+ * test, and then fails only in a live Logseq — as sizing that stops applying, a nav face that will not
+ * hide, a drag the iframes swallow, an edit chrome that never appears, or a tab strip whose buttons drag
+ * the whole window.
  *
  * They live HERE, next to the rules that consume them, because `dock.ts` already imports this module
  * (for {@link buildDockCss}, {@link sheetMarker} and {@link slotWeightVar}); defining them there and
@@ -57,11 +65,37 @@ const DIVIDER_PX = 6
  */
 export const DOCK_KEY = 'dock'
 /**
+ * `provideUI` key of the tab strip — a SECOND, independent injection, so the strip can ride in the app
+ * header's left cell while the dock stays in the sidebar column. Two host subtrees, two containers, two
+ * health checks (`dock.ts`). Same constraint as {@link DOCK_KEY}: bare CSS ident only.
+ */
+export const TABS_KEY = 'tabs'
+/**
+ * The host row the tab strip belongs in: the app header's left cell, the one that already carries the
+ * sidebar toggle and the search button.
+ *
+ * `dock.ts` hands this to `provideUI` as the injection `path` and this sheet spells it again in the
+ * placement rule ({@link tabsPlacementRules}) — two halves of one placement, so it is one string. Drift
+ * injects the strip into one row while the sheet styles the other: no flex line, the header's outsized
+ * font-size left standing, and — the one that is not cosmetic — no `-webkit-app-region: no-drag`, so a
+ * pointerdown anywhere on the strip starts a WINDOW DRAG instead of clicking a tab.
+ *
+ * Only the preferred row is shared. The fallback (the sidebar column) is deliberately NOT: `dock.ts`
+ * injects into the dock's own append point, while the rule below matches the looser `#left-sidebar
+ * <container>` — the strip has to stay styled wherever in that column it ends up.
+ */
+export const TABS_PATH = '.cp__header > .l'
+/**
  * Toggled on our own container for the duration of any drag started outside the docked views. The
  * pointer-events passthrough this sheet emits is gated on it.
  */
 export const DRAGGING_CLASS = 'sdock-dragging'
-/** Toggled on our own container by the gear; every edit-mode rule in this sheet is gated on it. */
+/**
+ * Toggled on BOTH our containers by the gear; every edit-mode rule in this sheet is gated on it. Both,
+ * because the gear that flips it now stands in the header strip while the controls it reveals — the
+ * editbar and the per-slot panels — live in the dock container, and a class only reaches its own
+ * subtree.
+ */
 export const EDITING_CLASS = 'sdock-editing'
 /** The per-slot edit panel — our own node, but one that slot-clearing has to spare. */
 export const CONTROLS_CLASS = 'sdock-slot-controls'
@@ -72,6 +106,11 @@ export const CONTROLS_CLASS = 'sdock-slot-controls'
  */
 export function dockContainerId(pluginId: string): string {
   return `${pluginId}--${DOCK_KEY}`
+}
+
+/** DOM id of the injected tab-strip container. Same dual role as {@link dockContainerId}. */
+export function tabsContainerId(pluginId: string): string {
+  return `${pluginId}--${TABS_KEY}`
 }
 
 /**
@@ -85,9 +124,37 @@ export function slotWeightVar(slotId: string): string {
   return `--sdock-w-${slotId}`
 }
 
+/**
+ * Transient inline override of the sidebar width.
+ *
+ * Same dual role as {@link slotWeightVar}, and the same reason it is defined here: the width drag sets
+ * this property inline on `<html>` for the duration of the gesture, and the `!important` rule this
+ * sheet emits reads it ({@link widthVarFallback}) with the baked width as its fallback. Drift is
+ * silent and half-broken rather than broken — the rule keeps reading a property nobody writes, so the
+ * sidebar stops tracking the pointer mid-drag and only jumps to the final width once the re-provided
+ * sheet lands.
+ *
+ * Distinct from the `--sdock-w-<slotId>` family despite the near-miss prefix: this one lives on
+ * `<html>`, those live on our own layout roots, and nothing ever scans for both at once.
+ */
+export const WIDTH_VAR = '--sdock-width'
+
+/**
+ * The `var()` reference the sidebar-width override is built from — {@link WIDTH_VAR} over the baked
+ * width, so a drag in flight wins and a dropped inline value falls back to what the sheet says.
+ */
+export function widthVarFallback(px: number): string {
+  return `var(${WIDTH_VAR}, ${formatWidth(px)}px)`
+}
+
 /** Non-finite would substitute into `flex-grow` as an invalid value, collapsing the slot to zero. */
 function formatWeight(weight: number): string {
   return Number.isFinite(weight) ? String(weight) : '1'
+}
+
+/** Non-finite reaches both a `min()` argument and the marker comment; treat it as "no override". */
+function formatWidth(px: number): string {
+  return Number.isFinite(px) ? String(px) : '0'
 }
 
 /**
@@ -105,18 +172,26 @@ function safeTabToken(activeTab: string): string {
  * The marker line the sheet carries, and the exact text the dock polls the host document for.
  *
  * `provideStyle` is fire-and-forget over postMessage, so the dock has no completion signal: it drops
- * the inline `--sdock-w-*` overrides a drag left behind only once a `<style>` element containing THIS
- * string has appeared. It therefore has to encode everything a re-provide could have changed about the
- * geometry — which tab is active, which slots exist, their axis and their baked weights — or the dock
- * would mistake the previous sheet for the new one and snap the drag back for one frame. Both sides
- * must agree on the exact text, hence one function rather than two format strings.
+ * the inline overrides a drag left behind — `--sdock-w-*` on a layout root, {@link WIDTH_VAR} on `<html>`
+ * — only once a `<style>` element containing THIS string has appeared. It therefore has to encode
+ * everything a re-provide could have changed about the geometry — which tab is active, which slots
+ * exist, their axis, their baked weights AND the baked sidebar width — or the dock would mistake the
+ * previous sheet for the new one and snap the drag back for one frame. The width is in here rather than
+ * probed separately precisely because it can be the ONLY thing that changed: a resize of the sidebar
+ * leaves every weight exactly where it was.
+ *
+ * Both sides must agree on the exact text, hence one function rather than two format strings.
  */
-export function sheetMarker(activeTab: string, layouts: readonly ResolvedLayout[]): string {
+export function sheetMarker(
+  activeTab: string,
+  layouts: readonly ResolvedLayout[],
+  sidebarWidthPx: number,
+): string {
   const parts = layouts.map((layout) => {
     const slots = layout.slots.map((slot) => `${slot.id}=${formatWeight(slot.weight)}`).join(',')
     return `${layout.id}:${layout.axis === 'row' ? 'r' : 'c'} ${slots}`
   })
-  return `/* sdock-sig tab=${safeTabToken(activeTab)} | ${parts.join(' | ')} */`
+  return `/* sdock-sig tab=${safeTabToken(activeTab)} w=${formatWidth(sidebarWidthPx)} | ${parts.join(' | ')} */`
 }
 
 /**
@@ -175,7 +250,22 @@ ${sel} iframe {
  */
 function faceRules(dockId: string, hasActiveLayout: boolean): string {
   if (!hasActiveLayout) {
-    return `/* nav face: the stock navigation owns the column, the dock shrinks to its tab strip. */
+    return `/* nav face: the stock navigation owns the column and the dock leaves it entirely — the tab strip
+   that used to keep the container on screen is its own injection in the header row now. Hidden is
+   still not unmounted: every docked iframe inside keeps running and keeps its state.
+   The carve-out is the parse-error diagnostic. While the stored JSON does not parse every edit is
+   refused, and the tab a user would have to flip to in order to read WHY is itself named by that
+   broken configuration — so the one child worth keeping on screen keeps its container on screen with
+   it. As a selector rather than a build-time flag, so the error state never becomes an input to this
+   sheet (it would then have to be re-provided on every parse transition). */
+${dockId}:not(:has(.sdock-config-error)) {
+  display: none;
+}
+
+/* The two rules below look superseded by the one above and are not: they are what the carve-out state
+   looks like. A container kept on screen for the diagnostic must show the diagnostic and NOTHING else
+   — the layout roots and the editbar belong to a face the user is not on — and it must claim only the
+   room that message needs, instead of the whole column the layout face gives it. */
 ${dockId} {
   flex: 0 0 auto;
 }
@@ -196,6 +286,91 @@ ${dockId} {
 #left-sidebar .left-sidebar-inner > .wrap > .nav-contents-container,
 #left-sidebar .left-sidebar-inner > .wrap > footer.create {
   display: none !important;
+}`
+}
+
+/**
+ * Where the tab strip's own injected container sits — in BOTH the rows it can land in.
+ *
+ * Its home is the app header's left cell, the row that already carries the sidebar toggle and the
+ * search button; it falls back to the top of the sidebar column when that cell cannot be resolved, so a
+ * renamed host cell degrades the placement instead of losing the strip altogether (`dock.ts`). Both
+ * placements are emitted unconditionally: which one is in force is a fact about the host DOM that the
+ * dock discovers at assert time, not an input to this sheet, and a strip that has just been moved from
+ * one row to the other must not have to wait for a re-provide to be styled for its new home.
+ */
+function tabsPlacementRules(tabsId: string): string {
+  return `/* The strip rides in a host row it does not own, so it has to sit in that row's flex line, opt out
+   of the window drag region the header sets on ITSELF (the host exempts only a/svg/button, and a
+   pointerdown that starts a window drag never reaches our buttons), and ignore the outsized
+   font-size the header applies to its own children. */
+${tabsId} {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  font-size: 12px;
+  -webkit-app-region: no-drag;
+}
+
+${TABS_PATH} > ${tabsId} {
+  /* Basis 0: take the room the header cell has left over rather than widening the cell — that cell's
+     width is the sidebar's, and growing it would push the search button across the header. */
+  flex: 1 1 0;
+  padding: 0 8px 0 6px;
+}
+
+/* Fallback placement: the top of our own column. Order -2 puts it above the dock container's -1 —
+   both are appended last, after footer.create. */
+#left-sidebar ${tabsId} {
+  order: -2;
+  flex: 0 0 auto;
+  padding: 2px 8px 6px;
+}
+
+/* Wrapping is placement-dependent. In a column the strip may wrap to more rows rather than overflow
+   — there is no menu to hide tabs behind and the sidebar can be narrow — but in the header row an
+   extra row would grow the app header itself, so there the tabs shrink and ellipsize instead (see
+   .sdock-tab). */
+#left-sidebar ${tabsId} .sdock-tabs {
+  flex-wrap: wrap;
+}
+
+/* It switches the LEFT SIDEBAR's face; with the sidebar closed there is no face to switch. */
+main:not(.ls-left-sidebar-open) ${tabsId} {
+  display: none;
+}`
+}
+
+/**
+ * The sidebar-width override — tab-independent, unlike everything in {@link faceRules}.
+ *
+ * Zero (the settings module's `WIDTH_FOLLOW_HOST`) means "no override": the sheet then says nothing
+ * about the width at all, and the marker simply carries `w=0`.
+ */
+function widthRules(sidebarWidthPx: number): string {
+  if (!Number.isFinite(sidebarWidthPx) || sidebarWidthPx <= 0) return ''
+
+  return `
+
+/* The sidebar is widened past the limit the host imposes on ITSELF: its resizer clamps to 240-460px
+   and writes the result as an INLINE custom property on <html>. An !important author declaration
+   outranks a non-important inline one — that is the entire mechanism — and since every downstream
+   rule (#left-sidebar's width, main's padding-left, the header cell's min-width) reads this one var,
+   the whole layout follows coherently.
+   Unconditional across every tab on purpose: the dock width IS the sidebar width, so there is one
+   remembered value and flipping to another tab (or back to the stock navigation) never relayouts the
+   main content behind it. It also supersedes the host's own resizer outright instead of half-masking
+   it — left live on the Nav tab, that resizer could only write a clamped value this very rule masks.
+   Gated on the sidebar being OPEN, because not every downstream rule is: main's padding-left is
+   scoped to .is-left-sidebar-open, but the header's left cell takes
+   \`min-width: var(--ls-left-sidebar-width)\` unconditionally (header.css). Ungated, a closed
+   sidebar would still reserve our widened value in that cell and shove the search button and
+   everything right of it across the header — room held for a column nothing is showing.
+   Capped to the viewport reserve, mirroring the drag-time clamp in divider.ts: a width persisted on a
+   wide monitor must never swallow a narrower window later — the handle to drag it back would itself
+   sit past the viewport edge, and with the override on every tab there is no tab left to escape to. */
+html:has(main.ls-left-sidebar-open) {
+  --ls-left-sidebar-width: min(${widthVarFallback(sidebarWidthPx)}, calc(100vw - ${VIEWPORT_RESERVE_PX}px)) !important;
 }`
 }
 
@@ -238,6 +413,7 @@ ${slots.join('\n\n')}`
 /** The complete stylesheet for the keyed `provideStyle` sheet. */
 export function buildDockCss(opts: DockCssOptions): string {
   const dockId = `#${escapeIdent(dockContainerId(opts.pluginId))}`
+  const tabsId = `#${escapeIdent(tabsContainerId(opts.pluginId))}`
   const active = opts.layouts.find((layout) => layout.id === opts.activeTab) ?? null
 
   // Every layout's DOM exists at all times, so a hosted pid needs its `!important` cage whether or not
@@ -252,7 +428,7 @@ export function buildDockCss(opts: DockCssOptions): string {
   const layouts = opts.layouts.map((layout) => layoutRules(layout, layout.id === active?.id)).join('\n\n')
 
   return `/* logseq-sidebar-dock — generated, do not edit by hand */
-${sheetMarker(opts.activeTab, opts.layouts)}
+${sheetMarker(opts.activeTab, opts.layouts, opts.sidebarWidthPx)}
 
 /* The host gives .nav-contents-container the whole (fixed height) column; hand the leftover to us. */
 #left-sidebar .left-sidebar-inner > .wrap .nav-contents-container {
@@ -269,18 +445,20 @@ ${dockId} {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-}
+}${widthRules(opts.sidebarWidthPx)}
 
 ${faceRules(dockId, active !== null)}
 
-/* Tab strip: rounded track, active tab raised as a chip. Wraps to more rows rather than overflowing —
-   there is no menu to hide tabs behind, and the sidebar can be narrow. */
+${tabsPlacementRules(tabsId)}
+
+/* Tab strip: rounded track, active tab raised as a chip. It fills whichever container it was injected
+   into, and the spacing around it is that container's padding — the two placements want different
+   ones (see tabsPlacementRules), and a margin here would have to be undone in one of them. */
 .sdock-tabs {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
-  flex-wrap: wrap;
   gap: 2px;
-  margin: 2px 8px 6px;
   padding: 2px;
   border-radius: var(--ls-border-radius-medium, 8px);
   background: var(--ls-tertiary-background-color, rgba(127, 127, 127, 0.14));
@@ -288,8 +466,11 @@ ${faceRules(dockId, active !== null)}
 
 .sdock-tab,
 .sdock-tab-btn {
-  /* Content-sized, NOT an equal share: with a resizable sidebar \`flex: 1 1 0\` stretches two tabs to
-     absurd widths, and once the strip wraps an equal share is meaningless anyway. */
+  /* Content-sized but shrinkable, NOT an equal share: with a resizable sidebar \`flex: 1 1 0\` stretches
+     two tabs to absurd widths, and once the strip wraps an equal share is meaningless anyway. The
+     shrink half is what the header placement needs — that row is only as wide as the user's sidebar
+     and cannot wrap, so the tabs give up width and ellipsize (below) rather than spill over the
+     search button. */
   flex: 0 1 auto;
   min-width: 0;
   max-width: 100%;
@@ -310,6 +491,15 @@ ${faceRules(dockId, active !== null)}
   user-select: none;
   opacity: 0.75;
   transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+/* The two icon buttons are not tabs, and the shrink half above is wrong for them. A tab that gives up
+   width ellipsizes and stays readable; a one-glyph button that gives up width is clipped to nothing by
+   the same \`overflow: hidden\` — and these two are the ONLY way into edit mode and, with no layouts
+   configured, the only way to a first tab, so losing them in a narrow header row loses every edit
+   control in the dock with them. They keep their width; the tabs beside them give up theirs. */
+.sdock-tab-btn {
+  flex: 0 0 auto;
 }
 
 .sdock-tab:hover,

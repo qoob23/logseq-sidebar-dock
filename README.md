@@ -1,14 +1,18 @@
 # Sidebar Dock (`logseq-sidebar-dock`)
 
-A Logseq **0.10.x** (Markdown/file graph) plugin that gives the **left sidebar** two faces, picked with a
-segmented **Nav / Views** control pinned at the top of the sidebar:
+A Logseq **0.10.x** (Markdown/file graph) plugin that gives the **left sidebar** as many faces as you
+want, picked from a tab strip that sits in the app header, on the same row as the search button:
 
-- **Nav** — the stock navigation, full height, exactly as Logseq ships it.
-- **Views** — the stock navigation steps aside and a **dock** fills the whole sidebar, hosting **two
-  user-selectable plugin views** with a **draggable divider** between them.
+- **Nav** — the stock navigation, full height, exactly as Logseq ships it. Always the first tab.
+- **your layouts** — one tab each: the stock navigation steps aside and a **dock** fills the whole
+  sidebar with that layout's **slots**, stacked in a column or laid out in a row, with a **draggable
+  divider** between neighbours. Every slot holds a plugin view, a renderer macro, or nothing yet.
 
-Switching faces is a stylesheet swap, so a docked view is only hidden, never unmounted — iframes keep
-running (and keep their scroll position and state) while you are on the Nav face.
+Layouts are built from the dock's own UI — a gear in the tab strip, no JSON editing — and the sidebar
+itself can be dragged wider than Logseq's own limit allows.
+
+Switching tabs is a stylesheet swap, so a docked view is only hidden, never unmounted — iframes keep
+running (and keep their scroll position and state) while you are on another tab.
 
 ## How a view gets into a slot
 
@@ -31,19 +35,25 @@ host and providers get an `embedUnmount`.
 single-instance view are "last mount wins"), the slot shows *"View is open in another surface"* with a
 **Reclaim** button. The dock never steals the view back on its own; clicking Reclaim does.
 
-## Slot layout
+A slot can hold a **renderer macro** instead of a plugin view: give it something like
+`{{renderer :my-macro, arg}}` and the dock asks the plugins the same way Logseq's own macro blocks do,
+so whichever plugin answers renders into the slot. Nothing answers → the slot says so.
 
-The dock shows only the slots you configured:
+## Layouts and slots
 
-| Top view | Bottom view | Dock |
-|---|---|---|
-| set | set | both slots, divider between them at **Divider position** |
-| set | `none` | the top view fills the dock, no divider |
-| `none` | set | the bottom view fills the dock, no divider |
-| `none` | `none` | one slot with the "no view selected" hint |
+A **layout** is a name (up to 12 characters — it is a tab label), an axis, and an ordered list of slots.
+Add as many layouts as you like, up to 12 slots each; an unconfigured slot is a visible, clickable box
+with a "pick a view" hint rather than nothing at all.
 
-**Divider position** is remembered while a single view fills the dock — it just does not apply, and
-comes back as soon as both slots are configured again.
+Slots are sized by **weight**, not percentages: dragging a divider moves weight between the two slots it
+sits between and leaves every other slot exactly where it was, so adding or removing a slot never
+reshuffles the sizes you already picked.
+
+A layout's slots are filled the first time you open its tab and stay mounted for the rest of the
+session — a graph full of layouts does not boot every docked plugin at startup.
+
+The same plugin may appear in more than one layout, but most plugin views are a single instance:
+switching between two tabs that both want it hands it over, which reloads it. The slot's editor says so.
 
 ## Build
 
@@ -64,29 +74,59 @@ Other scripts: `npm run typecheck`, `npm run lint` (`lint:fix`), `npm test`.
 > **Reload the plugin after every rebuild.** Toggle it off/on, or use the plugin card's **⟳ reload**
 > control (shown for unpacked + enabled plugins). A stale bundle otherwise runs silently.
 
-## Switch faces
+## Switch tabs
 
-Click **Nav** or **Views** in the segmented control at the top of the left sidebar. The choice is
-persisted (it survives restarts) and is also editable as the **Sidebar face** setting.
+Click a tab in the strip in the app header, next to the search button (it hides itself while the left
+sidebar is closed — there is no face to switch then; and if that row cannot be found it falls back to the
+top of the sidebar). The choice is persisted (it survives restarts) and is also editable as the **Active
+tab** setting.
 
-## Pick the two views
+## Edit layouts
 
-Plugins → **Sidebar Dock** → ⚙ **Settings**:
+The two icon buttons at the end of the tab strip work whether or not you are editing: **+** adds a layout
+and switches to it, **⚙** turns edit mode on and off. Adding a layout or a slot turns edit mode on by
+itself — a tab or a slot you cannot immediately fill would be a dead end.
+
+In edit mode the active layout gets a control bar under the tabs, and every slot gets a small panel over
+its top edge:
+
+| Control | What it does |
+|---|---|
+| name field | Renames the layout — that is its tab label. Commits on Enter or when it loses focus. |
+| **↔** / **↕** | Flips the layout between a column of slots and a row. |
+| **+ slot** | Appends a slot to the layout. |
+| **Drop tab** | Removes the whole layout. |
+| slot picker | `— none —`, any installed plugin, or `macro…`, which reveals a text field for the macro. |
+| **↑ ↓** (**← →** in a row layout) | Moves the slot along the layout. |
+| **✕** | Removes the slot. |
+
+Removing something that holds a view asks first: the button relabels itself **Sure?** and a second click
+within a few seconds does it. Removing an empty slot or an empty layout is a single click.
+
+The plugin list refreshes itself when plugins are installed, enabled, disabled or reloaded, and a plugin
+you configured stays in the list even while it is disabled, so its slot never silently reads as
+`— none —`. A docked plugin that reloads is re-mounted automatically.
+
+## Resize the sidebar
+
+Drag the left sidebar's edge as usual — the dock takes the gesture over and ignores Logseq's own 460px
+ceiling, so two plugin views can have a column wide enough to be readable. The width is one value for
+every tab, Nav included (the dock's width *is* the sidebar's, so switching tabs never re-lays-out the
+page behind it), and it never grows past the window minus 200px, so the drag handle stays reachable on a
+smaller screen than the one you set it on.
+
+## Settings
+
+Plugins → **Sidebar Dock** → ⚙ **Settings** is the escape hatch, not the main editor:
 
 | Setting | Meaning |
 |---|---|
-| **Sidebar face** | `nav` or `views` — same thing the segmented control sets. |
-| **Top view** | Plugin shown in the upper slot (`none` = unconfigured). |
-| **Bottom view** | Plugin shown in the lower slot (`none` = unconfigured). |
-| **Divider position (%)** | Share of the dock given to the top view (15–85), when both slots are configured. Dragging the divider writes this. |
-
-The dropdowns list every registered plugin and refresh themselves when plugins are installed, enabled,
-disabled, or reloaded (reopen the settings pane to see the updated list). A docked plugin that reloads is
-re-mounted automatically.
+| **Layouts (raw JSON)** | The whole configuration — every tab, slot and weight. There to be read, copied between graphs, or repaired by hand. While the text does not parse the dock keeps showing the last version that did and refuses every edit, so a typo cannot cost you the configuration. |
+| **Poke before docking** | For plugins that only build their view once toggled: `plugin-id = models.key; other-id = commands.key`. The listed model or command is invoked to coax the plugin into rendering, at most once every few seconds per plugin. |
+| **Active tab** | `nav` or a layout id — the same thing the tab strip sets. |
+| **Sidebar width (px)** | 180–1600, or `0` to follow Logseq's own width. Dragging the sidebar edge writes this. |
 
 Notes:
 
-- A plugin's view is a single instance, so the same plugin cannot fill both slots — picking it twice
-  leaves the bottom slot unconfigured.
 - A plugin that supports neither the embed protocol nor main-UI adoption (shadow-mode plugins, or
   plugins that only add toolbar items) shows an explanatory placeholder.

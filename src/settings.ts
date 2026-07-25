@@ -6,15 +6,33 @@
  * host-echoed values as a base plus an in-memory override layer that wins until the echo agrees. In-dock
  * editing makes that layer load-bearing rather than a nicety — every gear-menu action writes.
  *
- * Three flat keys, and {@link DockSettings.activeTab} stays OUT of the {@link DockSettings.layouts} JSON
+ * Four flat keys, and {@link DockSettings.activeTab} stays OUT of the {@link DockSettings.layouts} JSON
  * blob deliberately: it is rewritten on every tab click and the override layer is per key, so keeping it
  * separate stops a tab flip from clobbering a config edit whose echo has not arrived yet.
+ * {@link DockSettings.sidebarWidthPx} is flat for the same reason and one more: the width is GLOBAL, not
+ * a property of any layout — the dock's width is the sidebar's width, so a tab flip must never relayout
+ * the main content behind it.
  */
 
 import { type DockConfig, resolveLayoutSlots, specSignature } from './config'
 
 /** {@link DockSettings.activeTab} value for the stock navigation; anything else is a layout id. */
 export const NAV_TAB = 'nav'
+
+/**
+ * Bounds of the sidebar-width override, deliberately far wider than the host's own 240-460 clamp — two
+ * docked plugin views in a 460px column is precisely the thing this plugin exists to make possible.
+ */
+export const WIDTH_MIN = 180
+export const WIDTH_MAX = 1600
+/**
+ * "No override — the host's own width stands."
+ *
+ * Zero is not a width anyone could want, so it doubles as the off switch: no rule is emitted into the
+ * stylesheet, so the sidebar simply keeps whatever width Logseq gives it — until a drag on the host's
+ * resizer picks one, which is the moment an override is born (see `dock.ts`'s seeded width drag).
+ */
+export const WIDTH_FOLLOW_HOST = 0
 
 export interface DockSettings {
   /** {@link NAV_TAB}, or the id of the layout whose tab is selected. */
@@ -23,15 +41,18 @@ export interface DockSettings {
   adoptPoke: string
   /** Canonical JSON of the {@link DockConfig}; blank means "no layouts yet". */
   layouts: string
+  /** Sidebar width (px) forced on every tab including nav, or {@link WIDTH_FOLLOW_HOST}. */
+  sidebarWidthPx: number
 }
 
 export const DEFAULT_SETTINGS: DockSettings = {
   activeTab: NAV_TAB,
   adoptPoke: '',
   layouts: '',
+  sidebarWidthPx: WIDTH_FOLLOW_HOST,
 }
 
-const SETTINGS_KEYS = ['activeTab', 'adoptPoke', 'layouts'] as const
+const SETTINGS_KEYS = ['activeTab', 'adoptPoke', 'layouts', 'sidebarWidthPx'] as const
 
 function asRecord(raw: unknown): Record<string, unknown> | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
@@ -53,6 +74,35 @@ function readText(source: Record<string, unknown> | null, key: string): string {
 }
 
 /**
+ * The sidebar-width override: a clamped px value, or {@link WIDTH_FOLLOW_HOST} for "not overriding".
+ *
+ * This shape needs its own reader rather than a generic clamped-number one, because the sentinel sits
+ * OUTSIDE the valid range: a plain clamp would raise `0` to {@link WIDTH_MIN} and silently turn "follow
+ * the host" into a 180px sidebar the user never asked for and cannot switch off again.
+ *
+ * The host's settings panel hands numbers back as strings, and a cleared number field arrives as a
+ * blank one — which is the user saying "no override", not "garbage", so it lands on the sentinel like
+ * every other unreadable value.
+ */
+function normalizeWidth(value: unknown): number {
+  let parsed: number
+  if (typeof value === 'number') {
+    parsed = value
+  } else if (typeof value === 'string' && value.trim() !== '') {
+    parsed = Number(value)
+  } else {
+    return WIDTH_FOLLOW_HOST
+  }
+  if (!Number.isFinite(parsed) || parsed === 0) return WIDTH_FOLLOW_HOST
+  // Two decimals: the drag produces sub-pixel values and the sheet renders them verbatim.
+  return Math.round(clamp(parsed, WIDTH_MIN, WIDTH_MAX) * 100) / 100
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
+}
+
+/**
  * Coerce anything the host hands back into a complete {@link DockSettings}.
  *
  * Unknown keys — including every v1 key (`mode`, `viewTop`, `macroBottom`, `splitPct`, …) — are simply
@@ -64,6 +114,7 @@ export function normalizeSettings(raw: unknown): DockSettings {
     activeTab: readSelection(source, 'activeTab', DEFAULT_SETTINGS.activeTab),
     adoptPoke: readText(source, 'adoptPoke'),
     layouts: readText(source, 'layouts'),
+    sidebarWidthPx: normalizeWidth(source?.['sidebarWidthPx']),
   }
 }
 
@@ -78,6 +129,11 @@ function normalizePatch(patch: Partial<DockSettings>): Partial<DockSettings> {
   // layouts"), so a cleared field must survive as '' instead of being dropped as "no change".
   if (patch.adoptPoke !== undefined) out.adoptPoke = patch.adoptPoke.trim()
   if (patch.layouts !== undefined) out.layouts = patch.layouts.trim()
+  // Same care as the free-text fields: {@link WIDTH_FOLLOW_HOST} is the legitimate "stop overriding"
+  // value, so it has to survive the patch instead of being clamped up to {@link WIDTH_MIN} or dropped
+  // as "no change" — and an override no echo can ever agree with would mask every later hand edit of
+  // the setting, since `settingsDiffer` compares the post-override values.
+  if (patch.sidebarWidthPx !== undefined) out.sidebarWidthPx = normalizeWidth(patch.sidebarWidthPx)
   return out
 }
 

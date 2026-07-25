@@ -3,7 +3,7 @@
 import '@logseq/libs'
 
 import { Dock, MODELS, type ModelEvent, eventData, eventValue } from './dock'
-import { SettingsStore, settingsDiffer } from './settings'
+import { SettingsStore, WIDTH_FOLLOW_HOST, WIDTH_MAX, WIDTH_MIN, settingsDiffer } from './settings'
 
 function main(): void {
   const pluginId = logseq.baseInfo.id
@@ -12,10 +12,10 @@ function main(): void {
   /**
    * (Re)publish the settings schema.
    *
-   * Three flat keys, all of them strings: the layout model is far too structured for
-   * `useSettingsSchema` (which has no array or nested-object input), so the whole configuration lives
-   * in `layouts` as canonical JSON and the dock's own edit mode is the editor. This panel is the
-   * escape hatch — for reading the JSON, copying it between graphs, or fixing something the UI cannot.
+   * Four flat keys: the layout model is far too structured for `useSettingsSchema` (which has no array
+   * or nested-object input), so the whole configuration lives in `layouts` as canonical JSON and the
+   * dock's own edit mode is the editor. This panel is the escape hatch — for reading the JSON, copying
+   * it between graphs, or fixing something the UI cannot.
    *
    * Every `default` is the CURRENT effective value, so re-publishing can never reset a setting. It
    * re-runs on host plugin-registry events because the schema is published once per session otherwise
@@ -32,7 +32,7 @@ function main(): void {
         title: 'Layouts (raw JSON)',
         description:
           'Canonical JSON of every tab, slot and weight. **Edit this from the sidebar instead** — the ' +
-          'gear in the dock\'s tab strip adds tabs and slots, picks views and renames things, and the ' +
+          'gear in the tab strip adds tabs and slots, picks views and renames things, and the ' +
           'divider between slots is draggable. Kept here to be read, copied between graphs or repaired ' +
           'by hand. While the text does not parse, the dock keeps showing the last version that did ' +
           'and refuses every edit, so a typo cannot cost you the configuration.',
@@ -54,8 +54,19 @@ function main(): void {
         default: settings.activeTab,
         title: 'Active tab',
         description:
-          '`nav` for the stock navigation, or a layout id. Set by clicking a tab at the top of the ' +
-          'sidebar; a value naming no layout falls back to the navigation.',
+          '`nav` for the stock navigation, or a layout id. Set by clicking a tab in the strip in the ' +
+          'app header, next to the search button (it falls back to the top of the sidebar if that row ' +
+          'cannot be found); a value naming no layout falls back to the navigation.',
+      },
+      {
+        key: 'sidebarWidthPx',
+        type: 'number',
+        default: settings.sidebarWidthPx,
+        title: 'Sidebar width (px)',
+        description:
+          `How wide the left sidebar is, on every tab (${String(WIDTH_MIN)}–${String(WIDTH_MAX)}); ` +
+          `${String(WIDTH_FOLLOW_HOST)} follows Logseq's own width. Also set by dragging Logseq's ` +
+          "sidebar resizer, which here ignores Logseq's own 460px limit.",
       },
     ])
   }

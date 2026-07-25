@@ -1,10 +1,25 @@
 import { describe, expect, it } from 'vitest'
 
 import { type ResolvedSlot, type ViewSpec, normalizeConfig, resolveLayoutSlots } from '../config'
-// The floor the sheet emits is owned by `divider.ts` — one constant, both sides.
-import { SLOT_MIN_PX } from '../divider'
+// The floor and the viewport reserve the sheet emits are owned by `divider.ts` — one constant each,
+// both sides.
+import { SLOT_MIN_PX, VIEWPORT_RESERVE_PX } from '../divider'
 import { EMBED_OWNER_ATTR } from '../embed'
-import { type DockCssOptions, type ResolvedLayout, buildDockCss, sheetMarker, slotWeightVar } from '../styles'
+import { WIDTH_FOLLOW_HOST } from '../settings'
+// `TABS_PATH` and `WIDTH_VAR` are the two names `dock.ts` and this sheet MUST spell identically — the
+// strip's `provideUI` path and the custom property a resize drag writes on <html>. They are imported
+// here for the same reason `dock.ts` imports them: a test that spelled the literals out again would
+// drift alongside the code it is meant to pin, and the failure only ever shows up in a live Logseq.
+import {
+  type DockCssOptions,
+  type ResolvedLayout,
+  TABS_PATH,
+  WIDTH_VAR,
+  buildDockCss,
+  sheetMarker,
+  slotWeightVar,
+  widthVarFallback,
+} from '../styles'
 
 const NONE: ViewSpec = { kind: 'none' }
 const plugin = (pid: string): ViewSpec => ({ kind: 'plugin', pid })
@@ -27,7 +42,13 @@ const LAYOUT_B: ResolvedLayout = {
   slots: [slot('s_333333', 1.5, plugin(PLUGIN_B)), slot('s_444444', 1)],
 }
 
-const NAV: DockCssOptions = { pluginId: 'logseq-sidebar-dock', activeTab: 'nav', layouts: [LAYOUT_A, LAYOUT_B] }
+/** The default width state: no override, so the host's own sidebar width stands. */
+const NAV: DockCssOptions = {
+  pluginId: 'logseq-sidebar-dock',
+  activeTab: 'nav',
+  layouts: [LAYOUT_A, LAYOUT_B],
+  sidebarWidthPx: WIDTH_FOLLOW_HOST,
+}
 const ACTIVE_A: DockCssOptions = { ...NAV, activeTab: 'l_aaaaaa' }
 const ACTIVE_B: DockCssOptions = { ...NAV, activeTab: 'l_bbbbbb' }
 
@@ -64,58 +85,69 @@ function declarations(css: string, selector: string): string {
 }
 
 describe('sheetMarker', () => {
-  it('encodes the tab, every layout, its axis and every baked weight', () => {
-    expect(sheetMarker('l_aaaaaa', [LAYOUT_A, LAYOUT_B])).toBe(
-      '/* sdock-sig tab=l_aaaaaa | l_aaaaaa:c s_111111=2,s_222222=1 | l_bbbbbb:r s_333333=1.5,s_444444=1 */',
+  it('encodes the tab, the sidebar width, every layout, its axis and every baked weight', () => {
+    expect(sheetMarker('l_aaaaaa', [LAYOUT_A, LAYOUT_B], 0)).toBe(
+      '/* sdock-sig tab=l_aaaaaa w=0 | l_aaaaaa:c s_111111=2,s_222222=1 | l_bbbbbb:r s_333333=1.5,s_444444=1 */',
     )
+    expect(sheetMarker('l_aaaaaa', [LAYOUT_A, LAYOUT_B], 620.5)).toContain('tab=l_aaaaaa w=620.5 |')
   })
 
   it('is the second line of the sheet, so the dock can poll the host for it', () => {
     // `provideStyle` is fire-and-forget over postMessage: a `<style>` containing this exact string is
     // the ONLY proof the new sheet has landed, and the drag's inline vars may not be dropped before it.
-    for (const opts of [NAV, ACTIVE_A, ACTIVE_B]) {
-      const marker = sheetMarker(opts.activeTab, opts.layouts)
+    for (const opts of [NAV, ACTIVE_A, ACTIVE_B, { ...ACTIVE_A, sidebarWidthPx: 620 }]) {
+      const marker = sheetMarker(opts.activeTab, opts.layouts, opts.sidebarWidthPx)
       expect(buildDockCss(opts).split('\n')[1]).toBe(marker)
       expect(buildDockCss(opts)).toContain(marker)
     }
   })
 
   it('changes on everything a re-provide could change about the geometry', () => {
-    const base = sheetMarker('l_aaaaaa', [LAYOUT_A, LAYOUT_B])
+    const base = sheetMarker('l_aaaaaa', [LAYOUT_A, LAYOUT_B], 0)
     const variants = [
-      sheetMarker('nav', [LAYOUT_A, LAYOUT_B]),
-      sheetMarker('l_bbbbbb', [LAYOUT_A, LAYOUT_B]),
-      sheetMarker('l_aaaaaa', [{ ...LAYOUT_A, axis: 'row' }, LAYOUT_B]),
-      sheetMarker('l_aaaaaa', [{ ...LAYOUT_A, slots: [slot('s_111111', 2.5), slot('s_222222', 1)] }, LAYOUT_B]),
-      sheetMarker('l_aaaaaa', [{ ...LAYOUT_A, slots: [slot('s_111111', 2)] }, LAYOUT_B]),
-      sheetMarker('l_aaaaaa', [LAYOUT_A]),
-      sheetMarker('l_aaaaaa', []),
+      sheetMarker('nav', [LAYOUT_A, LAYOUT_B], 0),
+      sheetMarker('l_bbbbbb', [LAYOUT_A, LAYOUT_B], 0),
+      sheetMarker('l_aaaaaa', [{ ...LAYOUT_A, axis: 'row' }, LAYOUT_B], 0),
+      sheetMarker('l_aaaaaa', [{ ...LAYOUT_A, slots: [slot('s_111111', 2.5), slot('s_222222', 1)] }, LAYOUT_B], 0),
+      sheetMarker('l_aaaaaa', [{ ...LAYOUT_A, slots: [slot('s_111111', 2)] }, LAYOUT_B], 0),
+      sheetMarker('l_aaaaaa', [LAYOUT_A], 0),
+      sheetMarker('l_aaaaaa', [], 0),
+      // A resize changes NO weight, so without the width in here the dock would mistake the previous
+      // sheet for the new one and snap the transient `--sdock-width` back for a frame.
+      sheetMarker('l_aaaaaa', [LAYOUT_A, LAYOUT_B], 620),
+      sheetMarker('l_aaaaaa', [LAYOUT_A, LAYOUT_B], 621),
     ]
     for (const variant of variants) expect(variant).not.toBe(base)
     expect(new Set(variants).size).toBe(variants.length)
   })
 
   it('is insensitive to nothing else — the same inputs give the same string', () => {
-    expect(sheetMarker('l_aaaaaa', [LAYOUT_A])).toBe(sheetMarker('l_aaaaaa', [{ ...LAYOUT_A }]))
+    expect(sheetMarker('l_aaaaaa', [LAYOUT_A], 620)).toBe(sheetMarker('l_aaaaaa', [{ ...LAYOUT_A }], 620))
   })
 
   it('strips a hostile tab, and never lets one truncate the sheet at a comment close', () => {
     const hostile: DockCssOptions = { ...NAV, activeTab: 'l_a*/ } body { display: none } /*' }
     const css = buildDockCss(hostile)
-    expect(sheetMarker(hostile.activeTab, hostile.layouts)).toBe(
-      `/* sdock-sig tab=l_abodydisplaynone | l_aaaaaa:c s_111111=2,s_222222=1 | l_bbbbbb:r s_333333=1.5,s_444444=1 */`,
+    expect(sheetMarker(hostile.activeTab, hostile.layouts, hostile.sidebarWidthPx)).toBe(
+      `/* sdock-sig tab=l_abodydisplaynone w=0 | l_aaaaaa:c s_111111=2,s_222222=1 | l_bbbbbb:r s_333333=1.5,s_444444=1 */`,
     )
     expect(css).not.toContain('*/ } body')
     // Stripped identically in the marker and in the active-chip selector, so garbage matches nothing.
     expect(css).toContain(".sdock-tab[data-tab='l_abodydisplaynone']")
-    expect(css.split('\n')[1]).toBe(sheetMarker(hostile.activeTab, hostile.layouts))
+    expect(css.split('\n')[1]).toBe(sheetMarker(hostile.activeTab, hostile.layouts, hostile.sidebarWidthPx))
   })
 
   it('substitutes 1 for a non-finite weight, in the marker as in the rule', () => {
     // NaN in `flex-grow` is an invalid value and would collapse the slot.
     const broken: ResolvedLayout = { ...LAYOUT_A, slots: [slot('s_111111', Number.NaN)] }
-    expect(sheetMarker('nav', [broken])).toContain('s_111111=1')
+    expect(sheetMarker('nav', [broken], 0)).toContain('s_111111=1')
     expect(buildDockCss({ ...NAV, layouts: [broken] })).toContain(`flex-grow: var(${slotWeightVar('s_111111')}, 1);`)
+  })
+
+  it('substitutes 0 for a non-finite width, so a poisoned value reads as "no override"', () => {
+    // It reaches a `min()` argument as well as this comment; neither may be handed `NaNpx`.
+    expect(sheetMarker('nav', [LAYOUT_A], Number.NaN)).toContain('w=0')
+    expect(buildDockCss({ ...NAV, sidebarWidthPx: Number.NaN })).not.toContain('--ls-left-sidebar-width')
   })
 })
 
@@ -219,15 +251,32 @@ describe('buildDockCss — faces', () => {
     }
   })
 
-  it('nav face: the dock shrinks to its tab strip and the stock navigation is untouched', () => {
+  it('nav face: the dock leaves the column entirely and the stock navigation is untouched', () => {
+    // The tab strip is its own injection in the header row now, so nothing in this container has to
+    // stay on screen to keep the faces switchable.
     const css = buildDockCss(NAV)
     // Two rules address the container: the always-on one (we are appended last but belong at the top
     // of the column) and the face rule that sizes it.
     expect(declarations(css, `#logseq-sidebar-dock--dock`)).toContain('order: -1;')
     expect(declarations(css, `#logseq-sidebar-dock--dock`)).toContain('flex: 0 0 auto;')
     expect(declarations(buildDockCss(ACTIVE_A), `#logseq-sidebar-dock--dock`)).toContain('flex: 1 1 auto;')
+    expect(block(css, '#logseq-sidebar-dock--dock:not(:has(.sdock-config-error))')).toBe('  display: none;')
     expect(css).toContain('#logseq-sidebar-dock--dock .sdock-layouts,\n#logseq-sidebar-dock--dock .sdock-editbar {\n  display: none;\n}')
     for (const selector of HOST_NAV_SELECTORS) expect(css).not.toContain(selector)
+  })
+
+  it('keeps a parse-error diagnostic on screen even on the nav face', () => {
+    // While the stored JSON does not parse every edit is refused — and the tab a user would flip to in
+    // order to read why is named by that very configuration. Hence a selector, not a builder flag:
+    // the error state never has to be re-provided into this sheet.
+    const css = buildDockCss(NAV)
+    expect(ruleBlocks(css, '#logseq-sidebar-dock--dock')).not.toContain('  display: none;')
+    // Hidden is never unmounted: a docked iframe under this container keeps running on the nav face.
+    expect(css).not.toContain('.sdock-layouts {\n  display: none;')
+  })
+
+  it('takes the dock out of hiding as soon as a layout tab is up', () => {
+    expect(ruleBlocks(buildDockCss(ACTIVE_A), '#logseq-sidebar-dock--dock:not(:has(.sdock-config-error))')).toEqual([])
   })
 
   it('falls back to the nav face for a tab that names no layout', () => {
@@ -254,8 +303,165 @@ describe('buildDockCss — faces', () => {
   })
 
   it('content-sizes the tabs so a wide sidebar does not stretch two of them absurdly', () => {
-    expect(buildDockCss(NAV)).toContain('flex: 0 1 auto;')
-    expect(block(buildDockCss(NAV), '.sdock-tabs')).toContain('flex-wrap: wrap;')
+    // Shrinkable too (`0 1`), which is what lets them ellipsize in the header row instead of spilling
+    // over the search button — that row cannot gain a line the way the sidebar column can.
+    const css = buildDockCss(NAV)
+    expect(css).toContain('flex: 0 1 auto;')
+    const tabRule = css.slice(css.indexOf('.sdock-tab,\n.sdock-tab-btn {'))
+    expect(tabRule.slice(0, tabRule.indexOf('}'))).toContain('text-overflow: ellipsis;')
+  })
+
+  it('exempts the icon buttons from that shrink — clipped, they take edit mode with them', () => {
+    // Ellipsizing a tab leaves it readable; ellipsizing a one-glyph button leaves nothing. The gear
+    // and the add-layout button are the only way into edit mode (and, with no layouts configured, to
+    // a first tab), so the tabs give up width in a narrow header row and these two never do.
+    const picked = declarations(buildDockCss(NAV), '.sdock-tab-btn')
+    expect(picked).toContain('flex: 0 1 auto;')
+    expect(picked).toContain('flex: 0 0 auto;')
+    // Both rules are one class deep, so SOURCE ORDER is the whole mechanism: the exemption has to come
+    // after the shared rule or the shrinkable declaration stands and the fix is inert.
+    expect(picked.indexOf('flex: 0 0 auto;')).toBeGreaterThan(picked.indexOf('flex: 0 1 auto;'))
+  })
+})
+
+describe('buildDockCss — tab strip placement', () => {
+  const css = buildDockCss(NAV)
+  const TABS = '#logseq-sidebar-dock--tabs'
+
+  it('styles the strip by its OWN injected-container id, not the dock container', () => {
+    // Two provideUI injections in two host subtrees: nothing may reach the strip through the dock.
+    expect(block(css, TABS)).toContain('display: flex;')
+    expect(css).not.toContain(`#logseq-sidebar-dock--dock ${TABS}`)
+  })
+
+  it('escapes a leading digit in the container id, exactly like the dock container', () => {
+    expect(buildDockCss({ ...NAV, pluginId: '9dock' })).toContain('#\\39 dock--tabs {')
+  })
+
+  it('sits in the header row without widening it, and outside the window drag region', () => {
+    // Basis 0 takes the room the header cell has left over; growing that cell would push the search
+    // button across the header. The header is a window drag region and the host exempts only
+    // a/svg/button, so a pointerdown on our track would start a window drag instead of a click.
+    expect(block(css, `${TABS_PATH} > ${TABS}`)).toContain('flex: 1 1 0;')
+    expect(block(css, TABS)).toContain('-webkit-app-region: no-drag;')
+    // The header sets an outsized font-size on its own children.
+    expect(block(css, TABS)).toContain('font-size: 12px;')
+  })
+
+  it('keeps a placement for the fallback row inside our own column', () => {
+    // dock.ts injects into the sidebar column when the header cell cannot be resolved; -2 puts the
+    // strip above the dock container's own order: -1.
+    const fallback = block(css, `#left-sidebar ${TABS}`)
+    expect(fallback).toContain('order: -2;')
+    expect(fallback).toContain('flex: 0 0 auto;')
+  })
+
+  it('wraps in the column and never in the header row', () => {
+    // An extra row is free in a sidebar column and would grow the app header; there the tabs
+    // ellipsize instead.
+    expect(block(css, `#left-sidebar ${TABS} .sdock-tabs`)).toBe('  flex-wrap: wrap;')
+    expect(block(css, '.sdock-tabs')).not.toContain('flex-wrap:')
+  })
+
+  it('hides itself while the sidebar whose face it switches is closed', () => {
+    expect(block(css, `main:not(.ls-left-sidebar-open) ${TABS}`)).toBe('  display: none;')
+  })
+
+  it('describes both placements unconditionally, on every tab', () => {
+    // Which row is in force is a fact about the host DOM the dock discovers at assert time; a strip
+    // that just moved rows must not wait for a re-provide to be styled for its new home.
+    for (const opts of [NAV, ACTIVE_A, ACTIVE_B]) {
+      const each = buildDockCss(opts)
+      for (const selector of [TABS, `${TABS_PATH} > ${TABS}`, `#left-sidebar ${TABS}`]) {
+        expect(ruleBlocks(each, selector)).toHaveLength(1)
+      }
+    }
+  })
+
+  it('places the header rule at the exact path dock.ts injects the strip into', () => {
+    // The two halves of one placement: `dock.ts` passes TABS_PATH to `provideUI` and this sheet spells
+    // it into the rule below. Were they to drift, the strip would land in the new row while the sheet
+    // still styled the old one — no flex line, the header's outsized font-size left standing, and no
+    // `-webkit-app-region: no-drag`, so a pointerdown on a tab would drag the WINDOW instead of
+    // switching tabs. Asserted through the constant so this test cannot drift with the builder: the
+    // literal appears in the sheet exactly once, and only underneath TABS_PATH.
+    expect(ruleBlocks(css, `${TABS_PATH} > ${TABS}`)).toHaveLength(1)
+    expect(css.split(TABS_PATH)).toHaveLength(2)
+    // The no-drag opt-out itself is on the bare container rule, so it survives EITHER placement.
+    expect(block(css, TABS)).toContain('-webkit-app-region: no-drag;')
+  })
+
+  it('highlights the active tab wherever the strip ended up', () => {
+    // Selector on the button alone — never scoped to a container, or the fallback row would lose it.
+    expect(css).toContain(".sdock-tab[data-tab='nav'],")
+    expect(css).not.toContain(`${TABS} .sdock-tab[data-tab=`)
+    // Same for the edit-mode chrome: the gear is in the strip, the controls it reveals are in the dock,
+    // so `dock.ts` puts the class on BOTH containers and no rule may assume either one.
+    expect(css).not.toContain(`${TABS}.sdock-editing`)
+    expect(css).toContain('.sdock-editing .sdock-gear {')
+  })
+})
+
+describe('buildDockCss — sidebar width override', () => {
+  const WIDTH_SEL = 'html:has(main.ls-left-sidebar-open)'
+  // The viewport cap mirrors VIEWPORT_RESERVE_PX: a width persisted on a wide monitor must not swallow
+  // a narrower window later, where the handle to drag it back would itself sit off-screen.
+  const WIDTH_RULE = `--ls-left-sidebar-width: min(${widthVarFallback(620)}, calc(100vw - ${String(VIEWPORT_RESERVE_PX)}px)) !important;`
+
+  /** Every base fixture with a width forced on it — the rule must not depend on which tab is up. */
+  const WIDENED = [NAV, ACTIVE_A, ACTIVE_B].map((opts) => ({ ...opts, sidebarWidthPx: 620 }))
+
+  it('emits the exact width probe the transient inline var is handed off through', () => {
+    // The drag writes WIDTH_VAR on <html>; this is the fallback it masks until it is dropped. Built
+    // FROM the constant `dock.ts` writes, and asserted through it here for the same reason: spelling
+    // the property out again on either side buys a rule that reads what nothing writes, so the sidebar
+    // stops tracking the pointer mid-drag and only jumps once the re-provided sheet lands — and no test
+    // that hardcoded the name could tell.
+    expect(widthVarFallback(620)).toBe(`var(${WIDTH_VAR}, 620px)`)
+    expect(declarations(buildDockCss({ ...ACTIVE_A, sidebarWidthPx: 620 }), WIDTH_SEL)).toContain(
+      `var(${WIDTH_VAR}, 620px)`,
+    )
+    for (const opts of WIDENED) {
+      expect(buildDockCss(opts)).toContain(`${WIDTH_SEL} {\n  ${WIDTH_RULE}`)
+      expect(buildDockCss({ ...opts, sidebarWidthPx: 621 })).not.toContain(widthVarFallback(620))
+    }
+  })
+
+  it('overrides the host variable with !important — the only way past its inline value', () => {
+    // The host clamps its own resizer to 240-460px and writes the result as a NON-important inline
+    // custom property on <html>; an !important author declaration outranking it is the whole feature.
+    for (const opts of WIDENED) {
+      expect(ruleBlocks(buildDockCss(opts), WIDTH_SEL)[0] ?? '').toContain(WIDTH_RULE)
+    }
+  })
+
+  it('applies on EVERY tab — one width, so a tab flip never relayouts the main content', () => {
+    // The Nav tab is widened too: the host's own resizer is superseded, not half-masked.
+    const blocks = WIDENED.map((opts) => ruleBlocks(buildDockCss(opts), WIDTH_SEL))
+    for (const each of blocks) expect(each).toEqual(blocks[0])
+    expect(buildDockCss({ ...ACTIVE_A, sidebarWidthPx: 1200 })).toContain(widthVarFallback(1200))
+  })
+
+  it('applies only while the sidebar is open — the header cell reserves this width unconditionally', () => {
+    // Ungated, a closed sidebar would keep the widened min-width on `.cp__header > .l` and push the
+    // search button (and everything right of it) across the header for a column nobody can see.
+    for (const opts of WIDENED) {
+      const css = buildDockCss(opts)
+      expect(ruleBlocks(css, 'html')).toEqual([])
+      expect(css.split('\n').some((line) => line.trim() === 'html {')).toBe(false)
+    }
+  })
+
+  it('emits nothing at all with no override in force, whatever the tab or the layout', () => {
+    for (const base of [NAV, ACTIVE_A, ACTIVE_B]) {
+      for (const layouts of [base.layouts, [LAYOUT_A], []]) {
+        const css = buildDockCss({ ...base, layouts, sidebarWidthPx: WIDTH_FOLLOW_HOST })
+        expect(css).not.toContain('--ls-left-sidebar-width')
+        expect(css).not.toContain(WIDTH_VAR)
+      }
+    }
+    // Negative is not a width either — normalization never produces one, but the builder is total.
+    expect(buildDockCss({ ...ACTIVE_A, sidebarWidthPx: -50 })).not.toContain('--ls-left-sidebar-width')
   })
 })
 
@@ -407,12 +613,19 @@ describe('buildDockCss — fed from a real configuration', () => {
       axis: layout.axis,
       slots: resolveLayoutSlots(layout),
     }))
-    const css = buildDockCss({ pluginId: 'logseq-sidebar-dock', activeTab: 'l_aaaaaa', layouts })
+    const css = buildDockCss({
+      pluginId: 'logseq-sidebar-dock',
+      activeTab: 'l_aaaaaa',
+      layouts,
+      sidebarWidthPx: WIDTH_FOLLOW_HOST,
+    })
 
     expect(css).toContain('flex-grow: var(--sdock-w-s_111111, 3);')
     expect(css).toContain('flex-grow: var(--sdock-w-s_222222, 0.5);')
     // The second slot resolved to `none` (a plugin's view is one node), so the pid appears once.
     expect(ruleBlocks(css, `.sdock-slot #${PLUGIN_A}_lsp_main`)).toHaveLength(1)
-    expect(sheetMarker('l_aaaaaa', layouts)).toBe('/* sdock-sig tab=l_aaaaaa | l_aaaaaa:r s_111111=3,s_222222=0.5 */')
+    expect(sheetMarker('l_aaaaaa', layouts, WIDTH_FOLLOW_HOST)).toBe(
+      '/* sdock-sig tab=l_aaaaaa w=0 | l_aaaaaa:r s_111111=3,s_222222=0.5 */',
+    )
   })
 })

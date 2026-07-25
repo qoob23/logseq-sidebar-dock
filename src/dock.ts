@@ -1,15 +1,21 @@
 /**
- * Host-side machinery: injects the dock pane into the left sidebar, keeps it alive, and fills the slots
- * of every configured layout — through the Embed Protocol v1 where the plugin supports it
- * (`docs/embed-protocol.md`), and by adopting the plugin's main-UI container where it does not.
+ * Host-side machinery: injects the dock pane into the left sidebar and the tab strip into the app
+ * header's left cell, keeps both alive, and fills the slots of every configured layout — through the
+ * Embed Protocol v1 where the plugin supports it (`docs/embed-protocol.md`), and by adopting the
+ * plugin's main-UI container where it does not.
  *
  * Runs inside our own (un-sandboxed, same-origin) plugin iframe and reaches into the host document
  * through `window.top`. The host has NO lifecycle management for `path`-injected UI, so re-assertion
  * is entirely ours: a debounced MutationObserver, an `App.onRouteChanged` re-check, and the
  * `LSPluginCore` plugin-registry events.
  *
- * What `provideUI` injects is only the two-child shell ({@link TEMPLATE}); the tab strip, the layout
- * roots, the slots, the dividers and every edit-mode control are built and reconciled HERE with
+ * TWO injections, in two host subtrees that belong to two different host components ({@link
+ * DOCK_PATH}, {@link TABS_PATH}) — hence two independent health checks ({@link isHealthy}, {@link
+ * isTabsHealthy}) and one observer that re-asserts when either goes down.
+ *
+ * What `provideUI` injects is only a one-child shell per container ({@link DOCK_TEMPLATE}, {@link
+ * TABS_TEMPLATE}); the tabs, the layout roots, the slots, the dividers and every edit-mode control are
+ * built and reconciled HERE with
  * `doc.createElement`, keyed by layout id and slot id (`docs/layout-config.md`, "DOM shape"). That is
  * not a style preference:
  *
@@ -56,7 +62,7 @@ import {
   sharedPluginIds,
   toggleLayoutAxis,
 } from './config'
-import { SLOT_MIN_PX, resizeWeights } from './divider'
+import { SLOT_MIN_PX, computeSidebarWidth, resizeWeights } from './divider'
 import {
   type BodyLike,
   EMBED_HOST_ATTR,
@@ -86,19 +92,31 @@ import {
   takeHostCleanup,
 } from './logseq-types'
 import { MACRO_HOOK_TYPE, buildMacroHookPayload, macroSlotDomId } from './macro'
-import { type DockSettings, NAV_TAB, type SettingsStore, configSignature, parseAdoptPokes } from './settings'
-// The container id, the class names and the `provideUI` key are selectors in that sheet as much as they
-// are DOM writes here, so they are DEFINED there and imported — see the block comment next to them.
+import {
+  type DockSettings,
+  NAV_TAB,
+  type SettingsStore,
+  WIDTH_FOLLOW_HOST,
+  configSignature,
+  parseAdoptPokes,
+} from './settings'
+// The container ids, the class names, the `provideUI` keys, the tab strip's injection path and the
+// transient width property are all selectors in that sheet as much as they are DOM writes here, so they
+// are DEFINED there and imported — see the block comment next to them.
 import {
   CONTROLS_CLASS,
   DOCK_KEY,
   DRAGGING_CLASS,
   EDITING_CLASS,
   type ResolvedLayout,
+  TABS_KEY,
+  TABS_PATH,
+  WIDTH_VAR,
   buildDockCss,
   dockContainerId,
   sheetMarker,
   slotWeightVar,
+  tabsContainerId,
 } from './styles'
 
 /** `provideStyle` key — the host looks it up with an UNQUOTED attribute selector: bare ident only. */
@@ -107,6 +125,16 @@ const STYLE_KEY = 'sdock-layout'
 const STYLE_ATTR = 'data-injected-style'
 /** Append point: last child of the sidebar's flex column, after `footer.create`. */
 const DOCK_PATH = '#left-sidebar .left-sidebar-inner > .wrap'
+/** The host's own sidebar resizer handle, which we hijack outright (see {@link Dock.assertWidthResizer}). */
+const WIDTH_RESIZER_SELECTOR = '#left-sidebar .left-sidebar-resizer'
+/** The sidebar element the host resizes — and the parent of the handle above. */
+const SIDEBAR_ID = 'left-sidebar'
+/**
+ * The host's OWN transient drag classes (`container.cljs`, `sidebar-resizer`): they suppress the
+ * sidebar's width transition, without which every drag frame trails the pointer.
+ */
+const RESIZING_CLASS = 'is-resizing'
+const RESIZING_BUF_CLASS = 'is-resizing-buf'
 /**
  * Prefix of the per-slot `flex-grow` custom property, derived from the builder rather than re-typed:
  * the drag writes these inline on a layout root and the post-assert sweep has to find exactly those.
@@ -302,6 +330,11 @@ interface DockView {
   activeTab: string
   /** The layout {@link activeTab} names, or `null` on the nav face. */
   activeLayout: Layout | null
+  /**
+   * The sidebar-width override in force, or `WIDTH_FOLLOW_HOST`. Read here with everything else so the
+   * sheet and the marker `waitForSheet` polls for can never be built from two different values.
+   */
+  sidebarWidthPx: number
   /** Pids configured in more than one layout: the edit UI warns, because flipping tabs reloads them. */
   sharedPids: ReadonlySet<string>
   /** Plugin ids the source pickers offer. Read once per assert — the registry is a live host map. */
@@ -334,24 +367,66 @@ function sleep(ms: number): Promise<void> {
   })
 }
 
-/** Our container counts as healthy only when it is attached AND still holds our whole shell. */
+/**
+ * The dock container counts as healthy only when it is attached AND still holds our shell. It
+ * deliberately says NOTHING about the tab strip any more: that lives in another host subtree, under a
+ * container of its own, and a header row that has not rendered yet must not condemn a perfectly good
+ * dock to being torn down and re-injected (which would wipe every slot it holds).
+ */
 function isHealthy(el: HTMLElement | null): el is HTMLElement {
   if (el === null || !el.isConnected) return false
-  return el.querySelector('.sdock-tabs') !== null && el.querySelector('.sdock-layouts') !== null
+  return el.querySelector('.sdock-layouts') !== null
 }
 
 /**
- * The injected shell, and nothing else. `provideUI` with the same key rewrites the container's
+ * Which row the tab strip goes in right now.
+ *
+ * {@link TABS_PATH} (the app header's left cell) is the home — a different host component than the
+ * dock's, which is the whole reason the strip is a separate injection with its own health check (see
+ * {@link Dock.assertTabs}). {@link DOCK_PATH} is the fallback, so a renamed host cell degrades the
+ * PLACEMENT instead of losing the strip — and with it the only way to switch tabs — altogether.
+ */
+function tabsPath(doc: Document): string {
+  return doc.querySelector(TABS_PATH) === null ? DOCK_PATH : TABS_PATH
+}
+
+/**
+ * The strip inside the injected tab container — but only while that container is intact AND standing
+ * in the row we want it in RIGHT NOW. Placement is part of the health check because the header cell
+ * can arrive late: the first assert of a session may well land before it exists, in the fallback row,
+ * and nothing else would ever move it back up.
+ */
+function tabsStrip(doc: Document, tabsId: string): HTMLElement | null {
+  const el = doc.getElementById(tabsId)
+  if (el === null || el.parentElement !== doc.querySelector(tabsPath(doc))) return null
+  return el.querySelector<HTMLElement>('.sdock-tabs')
+}
+
+/** {@link tabsStrip} as the predicate the observer and {@link Dock.assertTabs} ask it as. */
+function isTabsHealthy(doc: Document, tabsId: string): boolean {
+  return tabsStrip(doc, tabsId) !== null
+}
+
+/**
+ * The injected shells, and nothing else. `provideUI` with the same key rewrites the container's
  * innerHTML, so every node that owns state — every slot element — has to be built outside it: see the
  * file header for what re-creating a slot costs.
  */
-const TEMPLATE = '<div class="sdock-tabs"></div><div class="sdock-layouts"></div>'
+const DOCK_TEMPLATE = '<div class="sdock-layouts"></div>'
+/**
+ * The tab strip's shell, injected on its own so it can live in the header row. The host binds its
+ * `data-on-<event>` delegation PER injected container, so the tabs, the gear and the add-layout button
+ * reach the same models from either placement.
+ */
+const TABS_TEMPLATE = '<div class="sdock-tabs"></div>'
 
 export class Dock {
   private readonly pluginId: string
   private readonly store: SettingsStore
   private readonly onPluginsChanged: (() => void) | null
   private readonly containerId: string
+  /** The tab strip's own injected container — a second, independent injection (see {@link TABS_PATH}). */
+  private readonly tabsId: string
   /** Keyed on slot id, which {@link normalizeConfig} keeps unique across ALL layouts for this reason. */
   private readonly mounts = new Map<SlotId, SlotMount>()
   private readonly strategies = new StrategyCache()
@@ -382,6 +457,20 @@ export class Dock {
   /** Aborts the host-document listeners bound for the duration of one divider drag. */
   private dragAbort: AbortController | null = null
   private dragging = false
+  /** The host resizer handle our listeners are bound to — tracked by identity, never by marking it. */
+  private widthResizerEl: HTMLElement | null = null
+  /** Aborts the listeners bound to {@link widthResizerEl}. */
+  private widthResizerAbort: AbortController | null = null
+  /** Aborts the host-document listeners bound for the duration of one sidebar-width drag. */
+  private widthDragAbort: AbortController | null = null
+  private widthDragging = false
+  /**
+   * Takes back a seeded-but-never-persisted width override (see {@link startWidthDrag}); nulled the
+   * moment a drag persists for real. Without it an aborted drag — or a plain click on the handle —
+   * would leave a phantom override in the store that no settings echo can ever agree with, silently
+   * masking even a hand-edited `sidebarWidthPx` until the plugin reloads.
+   */
+  private widthDragRevert: (() => void) | null = null
   private running = false
   private queued = false
   private disposed = false
@@ -403,6 +492,7 @@ export class Dock {
     this.store = store
     this.onPluginsChanged = onPluginsChanged ?? null
     this.containerId = dockContainerId(pluginId)
+    this.tabsId = tabsContainerId(pluginId)
   }
 
   /** Install the re-assertion hooks and build the dock for the first time. */
@@ -454,8 +544,8 @@ export class Dock {
   }
 
   /**
-   * Toggle the edit controls. Deliberately just a class flip on our own container: every edit-mode rule
-   * in the sheet is gated on {@link EDITING_CLASS}, so entering or leaving edit mode re-provides
+   * Toggle the edit controls. Deliberately just a class flip on our own containers: every edit-mode
+   * rule in the sheet is gated on {@link EDITING_CLASS}, so entering or leaving edit mode re-provides
    * nothing and cannot disturb a single mounted view. The controls themselves are always in the DOM.
    */
   toggleEdit(): void {
@@ -464,8 +554,19 @@ export class Dock {
     this.editing = !this.editing
     const doc = getHostDocument()
     if (doc === null) return
+    this.applyEditingClass(doc)
+  }
+
+  /**
+   * Push edit mode onto BOTH injected containers. A class only reaches its own subtree, and the mode's
+   * two halves are now in different host subtrees: the gear that raises when it is on stands in the
+   * header strip, while the editbar and the per-slot panels it reveals are in the dock container.
+   */
+  private applyEditingClass(doc: Document): void {
     runQuietly(() => {
-      doc.getElementById(this.containerId)?.classList.toggle(EDITING_CLASS, this.editing)
+      for (const id of [this.containerId, this.tabsId]) {
+        doc.getElementById(id)?.classList.toggle(EDITING_CLASS, this.editing)
+      }
     })
   }
 
@@ -579,13 +680,24 @@ export class Dock {
     this.endDrag()
     this.dividerAbort?.abort()
     this.dividerAbort = null
+    this.widthResizerAbort?.abort()
+    this.widthResizerAbort = null
+    this.widthResizerEl = null
     this.undockAll('dispose')
 
     const doc = getHostDocument()
     if (doc === null) return
+    // The width override itself dies with the provided sheet; the transient var and the host's own
+    // drag classes are ours to take back by hand.
+    this.endWidthDrag(doc)
+    doc.documentElement.style.removeProperty(WIDTH_VAR)
+
     const cleanup = takeHostCleanup(doc)
     if (cleanup !== null) runQuietly(cleanup)
     doc.getElementById(this.containerId)?.remove()
+    // Two injections, two containers to take with us. The strip holds nothing but our own markup, so
+    // unlike the dock container's slots there is nothing to hand back first.
+    doc.getElementById(this.tabsId)?.remove()
   }
 
   // ------------------------------------------------------------------ arm-then-confirm
@@ -641,6 +753,10 @@ export class Dock {
    * them: {@link syncSlotControls} rebuilds mean a half-typed macro spec is lost, and an arm is a
    * label flip on a node that is ours. Panels rebuilt later pick the state up at build time instead
    * ({@link markArmable}), so the two paths cannot disagree.
+   *
+   * The dock container only: every armable button is a destructive edit control (drop tab, drop slot),
+   * and those live in the editbar and the per-slot panels. The tab strip carries none — its two icon
+   * buttons add things.
    */
   private paintArmState(): void {
     const doc = getHostDocument()
@@ -713,6 +829,9 @@ export class Dock {
       // layout lands here and falls back to nav rather than showing nothing at all.
       activeTab: activeLayout?.id ?? NAV_TAB,
       activeLayout,
+      // Deliberately NOT validated against anything: the width belongs to no layout, so it survives
+      // every configuration edit, including one that leaves no layouts at all.
+      sidebarWidthPx: settings.sidebarWidthPx,
       sharedPids: sharedPluginIds(layouts),
       pluginOptions: getInstalledPluginIds(this.pluginId),
     }
@@ -768,29 +887,89 @@ export class Dock {
   private provideStyle(view: DockView): void {
     // Remembered, not recomputed later: `waitForSheet` has to look for the marker of the sheet we
     // actually provided, and the settings may well have moved on by the time it runs.
-    this.lastMarker = sheetMarker(view.activeTab, view.layouts)
+    this.lastMarker = sheetMarker(view.activeTab, view.layouts, view.sidebarWidthPx)
     logseq.provideStyle({
       key: STYLE_KEY,
-      style: buildDockCss({ pluginId: this.pluginId, activeTab: view.activeTab, layouts: view.layouts }),
+      style: buildDockCss({
+        pluginId: this.pluginId,
+        activeTab: view.activeTab,
+        layouts: view.layouts,
+        sidebarWidthPx: view.sidebarWidthPx,
+      }),
     })
   }
 
   private inject(): void {
-    logseq.provideUI({ key: DOCK_KEY, path: DOCK_PATH, template: TEMPLATE })
+    logseq.provideUI({ key: DOCK_KEY, path: DOCK_PATH, template: DOCK_TEMPLATE })
   }
 
-  /** `provideUI` is fire-and-forget over postMessage — poll for the node with a backoff. */
-  private async waitForContainer(doc: Document): Promise<HTMLElement | null> {
+  /**
+   * Keep the tab strip injected, in the row we currently want it in. Returns whether a strip is to be
+   * expected at all — false only when NEITHER row exists (the app shell is not rendered), so the
+   * caller can skip waiting for something nobody asked the host for.
+   *
+   * `setupInjectedUI` only rewrites an EXISTING container's innerHTML and never moves it, so a
+   * container left in the fallback row has to be torn down before the re-injection can place it in the
+   * header cell. That is what makes the placement heal when the header turns up after our first
+   * assert. The host's own teardown goes first (it also retires the libs-side effect), but its verdict
+   * is about the CALL, not the node — and it removes the node from the parent it was created under,
+   * which is exactly the parent that is wrong here — so the node itself is the only thing worth
+   * believing: still standing means removing it by hand, or we would re-inject into a container the
+   * host can neither move nor replace and the observer would re-assert forever.
+   */
+  private assertTabs(doc: Document): boolean {
+    if (isTabsHealthy(doc, this.tabsId)) return true
+    const path = tabsPath(doc)
+    const target = doc.querySelector(path)
+    if (target === null) return false
+
+    const el = doc.getElementById(this.tabsId)
+    if (el !== null && el.parentElement !== target) {
+      forceCleanInjectedUi(this.tabsId)
+      if (doc.getElementById(this.tabsId) !== null) {
+        runQuietly(() => {
+          el.remove()
+        })
+      }
+    }
+    logseq.provideUI({ key: TABS_KEY, path, template: TABS_TEMPLATE })
+    return true
+  }
+
+  /** `provideUI` is fire-and-forget over postMessage — poll for what it should have produced. */
+  private async pollForNode(get: () => HTMLElement | null): Promise<HTMLElement | null> {
     const deadline = Date.now() + POLL_BUDGET_MS
     let delay = POLL_START_MS
     for (;;) {
       if (this.disposed) return null
-      const el = doc.getElementById(this.containerId)
-      if (isHealthy(el)) return el
+      const el = get()
+      if (el !== null) return el
       if (Date.now() >= deadline) return null
       await sleep(delay)
       delay = Math.min(delay * 2, POLL_MAX_MS)
     }
+  }
+
+  private waitForContainer(doc: Document): Promise<HTMLElement | null> {
+    return this.pollForNode(() => {
+      const el = doc.getElementById(this.containerId)
+      return isHealthy(el) ? el : null
+    })
+  }
+
+  /**
+   * The tab strip, once its own injection has landed.
+   *
+   * Deliberately weaker than {@link isTabsHealthy}: placement is NOT waited on. The row we want can
+   * change while this is polling (the header cell rendering at last is exactly that), and holding out
+   * for it would burn the whole budget and then hand back nothing — leaving a strip that is standing
+   * but was never reconciled, i.e. empty, with no un-healthy state left for the observer to react to.
+   * Reconcile whatever landed; the assert the observer triggers is what moves it.
+   */
+  private waitForTabs(doc: Document): Promise<HTMLElement | null> {
+    return this.pollForNode(
+      () => doc.getElementById(this.tabsId)?.querySelector<HTMLElement>('.sdock-tabs') ?? null,
+    )
   }
 
   // ------------------------------------------------------------------ assert
@@ -803,32 +982,42 @@ export class Dock {
     const generation = ++this.watchGeneration
     const view = this.resolveView()
     this.provideStyle(view)
+    this.assertWidthResizer(doc)
+    const expectTabs = this.assertTabs(doc)
 
     // Missing, detached, or emptied by a third party — all heal the same way. Re-calling `provideUI`
-    // with the same key rewrites the container's innerHTML, so rescue adopted nodes first.
+    // with the same key rewrites the container's innerHTML, so rescue adopted nodes first. Scoped to
+    // the DOCK container alone: the strip going down is a reason to re-inject the strip, never to
+    // wipe and re-mount every docked view.
     if (!isHealthy(doc.getElementById(this.containerId))) {
       this.undockAll('wipe')
       this.inject()
     }
 
-    const container = await this.waitForContainer(doc)
+    // Both injections are fire-and-forget and land independently, so they are awaited together — one
+    // after the other would make a host that never answers cost two full budgets per assert.
+    const [container, tabsEl] = await Promise.all([
+      this.waitForContainer(doc),
+      expectTabs ? this.waitForTabs(doc) : Promise.resolve(null),
+    ])
     if (container === null || this.disposed) return
 
-    const tabsEl = container.querySelector<HTMLElement>('.sdock-tabs')
     const layoutsEl = container.querySelector<HTMLElement>('.sdock-layouts')
-    if (tabsEl === null || layoutsEl === null) return
+    if (layoutsEl === null) return
 
     this.attachDividers(doc, layoutsEl)
+    this.applyEditingClass(doc)
 
     // One `runQuietly` around the whole host-realm rebuild: if the markup shifted underneath us the
-    // shell is simply incomplete for this pass, and the slots we did reconcile still get filled.
+    // shell is simply incomplete for this pass, and the slots we did reconcile still get filled. The
+    // strip is reconciled inside its own container, which it may or may not have; a dock whose strip
+    // is missing for this pass still fills its slots.
     let nodes: ShellNodes = { roots: new Map(), slots: new Map() }
     runQuietly(() => {
-      container.classList.toggle(EDITING_CLASS, this.editing)
       nodes = this.syncLayouts(doc, layoutsEl, view)
-      this.syncTabs(doc, tabsEl, view)
+      if (tabsEl !== null) this.syncTabs(doc, tabsEl, view)
       this.syncEditbar(doc, container, layoutsEl, view)
-      this.syncConfigError(doc, container, tabsEl, view)
+      this.syncConfigError(doc, container, view)
     })
 
     this.missingPids.clear()
@@ -854,19 +1043,26 @@ export class Dock {
 
     this.watchMissingViews(generation)
 
-    // The stylesheet is what carries the weights from here on — but `provideStyle` is fire-and-forget,
-    // so only drop a drag's inline overrides once the new sheet is provably in the host document.
-    // Clearing them earlier flashes the previous ratio for a few frames.
-    const dirty = [...nodes.roots.values()].filter((root) => inlineWeightVars(root).length > 0)
-    if (this.dragging || dirty.length === 0) return
-    if (await this.waitForSheet(doc, generation)) {
-      if (this.dragging || generation !== this.watchGeneration) return
-      runQuietly(() => {
+    // The stylesheet is what carries the weights and the sidebar width from here on — but
+    // `provideStyle` is fire-and-forget, so only drop a drag's inline overrides once the new sheet is
+    // provably in the host document. Clearing one earlier flashes the previous value for a few frames.
+    //
+    // The two live on different nodes and either may be standing on its own (a resize changes no
+    // weight, a divider drag changes no width), so neither may early-return over the other — and both
+    // are re-checked after the wait, because a drag can start while it is running.
+    const dirty = this.dragging ? [] : [...nodes.roots.values()].filter((root) => inlineWeightVars(root).length > 0)
+    const clearWidth = !this.widthDragging && doc.documentElement.style.getPropertyValue(WIDTH_VAR) !== ''
+    if (dirty.length === 0 && !clearWidth) return
+    if (!(await this.waitForSheet(doc, generation))) return
+    if (generation !== this.watchGeneration) return
+    runQuietly(() => {
+      if (!this.dragging) {
         for (const root of dirty) {
           for (const name of inlineWeightVars(root)) root.style.removeProperty(name)
         }
-      })
-    }
+      }
+      if (clearWidth && !this.widthDragging) doc.documentElement.style.removeProperty(WIDTH_VAR)
+    })
   }
 
   /** True once the sheet standing in the host document is the one we last provided. */
@@ -1066,6 +1262,13 @@ export class Dock {
     if (el.getAttribute(EMBED_HOST_ATTR) !== this.pluginId) el.setAttribute(EMBED_HOST_ATTR, this.pluginId)
   }
 
+  /**
+   * The tab strip: one chip per layout plus the fixed nav tab, and the two icon buttons.
+   *
+   * Everything here is scoped to `tabsEl` and nothing else — no lookup climbs to a shared parent —
+   * which is what lets the strip live in the header while the layout roots it switches between stay in
+   * the sidebar column, two host subtrees away.
+   */
   private syncTabs(doc: Document, tabsEl: HTMLElement, view: DockView): void {
     const existing = keyedChildren(tabsEl, '.sdock-tab', (el) => el.dataset.tab ?? '')
     const ordered: HTMLElement[] = []
@@ -1190,11 +1393,13 @@ export class Dock {
   }
 
   /**
-   * The parse-error diagnostic. A child of the container rather than of `.sdock-layouts`, because the
-   * layouts are hidden on the nav face and this is precisely the state the user has to be told about
-   * wherever they are: while it is showing, every edit is refused.
+   * The parse-error diagnostic, at the top of the dock container — above the editbar and the layout
+   * roots, both of which the nav face hides. This is precisely the state the user has to be told about
+   * wherever they are (while it is showing, every edit is refused), and the nav face hides the whole
+   * container now that the strip has left it, so the sheet carries a `:has(.sdock-config-error)`
+   * carve-out that keeps the container on screen for exactly this child.
    */
-  private syncConfigError(doc: Document, container: HTMLElement, tabsEl: HTMLElement, view: DockView): void {
+  private syncConfigError(doc: Document, container: HTMLElement, view: DockView): void {
     const existing = container.querySelector<HTMLElement>(':scope > .sdock-config-error')
     if (view.error === null) {
       existing?.remove()
@@ -1204,7 +1409,7 @@ export class Dock {
     if (existing !== null && existing.dataset.sdockKey === text) return
     const hint = buildHint(doc, text)
     hint.classList.add('sdock-config-error')
-    if (existing === null) container.insertBefore(hint, tabsEl.nextSibling)
+    if (existing === null) container.insertBefore(hint, container.firstChild)
     else container.replaceChild(hint, existing)
   }
 
@@ -1831,6 +2036,176 @@ export class Dock {
     this.dragAbort = null
   }
 
+  // ------------------------------------------------------------------ sidebar width
+
+  /**
+   * Hijack the host's own sidebar resizer — on every tab, the stock navigation included.
+   *
+   * The host clamps its own drag to 240-460px, far too narrow for a column of docked plugin views, so
+   * the handle drives OUR width instead. Unconditional, because the dock width IS the sidebar width:
+   * our `!important` rule masks whatever the host's clamped drag would write anyway, so leaving that
+   * drag live on the Nav tab would only make the handle feel broken there. Its handler is an
+   * interact.js draggable bound on the DOCUMENT in the bubble phase, so a capture-phase listener on the
+   * handle itself runs long before it and can stop the event from ever reaching it.
+   *
+   * Failure mode, should that stop holding (interact.js binding in capture, or directly on the handle):
+   * both drags run, the host writes its clamped value into the inline `--ls-left-sidebar-width` — and
+   * our `!important` rule simply masks it. Degraded to the host's clamp, never broken.
+   *
+   * Bound by element IDENTITY rather than by marking the node the way `attachDividers` marks our own
+   * `.sdock-layouts`: the handle is host-rendered markup, so any attribute of ours would be wiped by
+   * the next re-render and we would re-bind on a node that already carries our listeners.
+   */
+  private assertWidthResizer(doc: Document): void {
+    const el = doc.querySelector<HTMLElement>(WIDTH_RESIZER_SELECTOR)
+    if (el === this.widthResizerEl) return
+
+    // A fresh handle means the old listeners (and any drag they had in flight) belong to a dead node.
+    this.endWidthDrag(doc)
+    this.widthResizerAbort?.abort()
+    this.widthResizerAbort = null
+    this.widthResizerEl = el
+    if (el === null) return
+
+    const abort = new AbortController()
+    this.widthResizerAbort = abort
+    const signal = abort.signal
+
+    el.addEventListener(
+      'pointerdown',
+      (ev) => {
+        if (ev.pointerType === 'mouse' && ev.button !== 0) return
+        ev.stopPropagation()
+        ev.stopImmediatePropagation()
+        ev.preventDefault()
+        this.startWidthDrag(doc, ev)
+      },
+      { signal, capture: true },
+    )
+
+    // interact.js may bind mouse events rather than pointer events, and swallowing `pointerdown` does
+    // not suppress the compatibility `mousedown` that follows it.
+    el.addEventListener(
+      'mousedown',
+      (ev) => {
+        if (!this.widthDragging) return
+        ev.stopPropagation()
+        ev.stopImmediatePropagation()
+        ev.preventDefault()
+      },
+      { signal, capture: true },
+    )
+  }
+
+  /**
+   * Our replacement for the host's clamped drag: the same handle and the same transient feedback, our
+   * own bounds.
+   *
+   * Writing {@link WIDTH_VAR} inline on `documentElement` is not what the "never write inline styles onto
+   * host nodes" rule is about: `<html>` is not host-RENDERED markup (no re-render wipes it) and this is
+   * the host's own channel for exactly this value — `container.cljs` sets `--ls-left-sidebar-width`
+   * there itself. The persistent value still goes through the sheet.
+   *
+   * The iframe pointer-events suspension every drag needs is already handled: {@link
+   * installDragPassthrough} binds its own capture-phase `pointerdown` on the host DOCUMENT, which runs
+   * BEFORE the handle-level listener above (capture descends root → target), so the class is on our
+   * container before this method is even entered.
+   *
+   * No `setPointerCapture` on the handle: it belongs to the host, and the capture-phase listeners on
+   * the host document are the real guarantee anyway (the divider's own capture call is best-effort).
+   */
+  private startWidthDrag(doc: Document, down: PointerEvent): void {
+    this.endWidthDrag(doc)
+    const sidebar = doc.getElementById(SIDEBAR_ID)
+    if (sidebar === null) return
+
+    const abort = new AbortController()
+    this.widthDragAbort = abort
+    const signal = abort.signal
+    this.widthDragging = true
+
+    // The host's own transient classes, set the way the host sets them (see RESIZING_CLASS).
+    sidebar.classList.add(RESIZING_CLASS)
+    doc.documentElement.classList.add(RESIZING_BUF_CLASS)
+
+    // With no override in force the sheet carries no `!important` rule at all, so nothing would read
+    // the transient var and the first drag frames would do nothing. Seed it with the width the sidebar
+    // already has — the same value, so visually a no-op — to bring that rule into existence. The seed
+    // is NOT a chosen width, so `widthDragRevert` stands ready to take it back until a real move
+    // persists it (see the field's doc for the phantom-override failure it prevents).
+    let latest = this.store.current().sidebarWidthPx
+    let moved = false
+    if (latest <= 0) {
+      const seed = sidebar.getBoundingClientRect()
+      latest = computeSidebarWidth(seed.right, seed.left, doc.documentElement.clientWidth)
+      this.store.override({ sidebarWidthPx: latest })
+      this.refreshStyle()
+      this.widthDragRevert = (): void => {
+        if (this.disposed) return
+        this.store.override({ sidebarWidthPx: WIDTH_FOLLOW_HOST })
+        this.refreshStyle()
+      }
+    }
+
+    doc.addEventListener(
+      'pointermove',
+      (ev) => {
+        // A second finger must not yank the sidebar.
+        if (ev.pointerId !== down.pointerId) return
+        if (ev.clientX !== down.clientX) moved = true
+        const rect = sidebar.getBoundingClientRect()
+        latest = computeSidebarWidth(ev.clientX, rect.left, doc.documentElement.clientWidth)
+        runQuietly(() => {
+          doc.documentElement.style.setProperty(WIDTH_VAR, `${String(latest)}px`)
+        })
+      },
+      { signal, capture: true },
+    )
+
+    const finish = (ev: PointerEvent): void => {
+      if (ev.pointerId !== down.pointerId) return
+      if (!this.widthDragging) return
+      // A click, not a drag: the user chose nothing, so nothing may persist — least of all the seed,
+      // which would freeze "follow the host" into a fixed width. `endWidthDrag` reverts it.
+      if (!moved) {
+        this.endWidthDrag(doc)
+        return
+      }
+      this.widthDragRevert = null
+      this.store.override({ sidebarWidthPx: latest })
+      // Bake the width into the persistent sheet. The inline var stays until the next assert clears
+      // it: `provideStyle` is fire-and-forget, so dropping it here snaps back for a few frames.
+      this.refreshStyle()
+      // NOT through `edit()`: that gate is the `layouts` write path and refuses while the stored JSON
+      // does not parse. The width belongs to no layout, so a typo in the raw config must not also cost
+      // the user the ability to resize their sidebar.
+      logseq.updateSettings({ sidebarWidthPx: this.store.current().sidebarWidthPx })
+      this.endWidthDrag(doc)
+      // Nothing about the DOM changed, but the assert is what proves the new sheet landed and drops
+      // the transient var again.
+      void this.assert()
+    }
+    doc.addEventListener('pointerup', finish, { signal, capture: true })
+    doc.addEventListener('pointercancel', finish, { signal, capture: true })
+  }
+
+  private endWidthDrag(doc: Document): void {
+    this.widthDragging = false
+    this.widthDragAbort?.abort()
+    this.widthDragAbort = null
+    // An unfinished (aborted or never-moved) drag takes its seeded override back; a drag that persisted
+    // cleared this first, so the persisted value stands.
+    const revert = this.widthDragRevert
+    this.widthDragRevert = null
+    revert?.()
+    // Idempotent, and safe when no drag ever ran: these are the host's classes and it removes them on
+    // its own dragend the same way.
+    runQuietly(() => {
+      doc.getElementById(SIDEBAR_ID)?.classList.remove(RESIZING_CLASS)
+      doc.documentElement.classList.remove(RESIZING_BUF_CLASS)
+    })
+  }
+
   // ------------------------------------------------------------------ host hooks
 
   private installHostHooks(): void {
@@ -1849,7 +2224,18 @@ export class Dock {
       timer = setTimeout(() => {
         timer = null
         if (this.disposed) return
-        if (!isHealthy(doc.getElementById(this.containerId))) void this.assert()
+        // Three independent stakes in three host subtrees, any one of which is a reason to re-assert:
+        // the dock container going down; the tab strip going down OR the header cell it belongs in
+        // finally turning up under it (both read as "unhealthy", since placement is part of that
+        // check); and the host re-rendering its own resizer handle, which would otherwise leave the
+        // width hijack bound to a dead node until some unrelated event came along.
+        if (
+          !isHealthy(doc.getElementById(this.containerId)) ||
+          !isTabsHealthy(doc, this.tabsId) ||
+          doc.querySelector<HTMLElement>(WIDTH_RESIZER_SELECTOR) !== this.widthResizerEl
+        ) {
+          void this.assert()
+        }
       }, OBSERVER_DEBOUNCE_MS)
     })
     observer.observe(target, { childList: true, subtree: true })
@@ -1880,6 +2266,11 @@ export class Dock {
     const offPassthrough = this.installDragPassthrough(doc)
 
     setHostCleanup(doc, () => {
+      // Usually run by a SUCCESSOR instance over a corpse of ours (a kill without `beforeunload`), so
+      // silence the pending async loops too; on the normal dispose path this is already true. It also
+      // has to be set BEFORE `endWidthDrag`, whose revert closure is a no-op once disposed — a corpse
+      // must not re-provide a stylesheet under the successor that has already replaced it.
+      this.disposed = true
       if (timer !== null) {
         clearTimeout(timer)
         timer = null
@@ -1888,6 +2279,14 @@ export class Dock {
       offRoute()
       offLifecycle?.()
       offPassthrough()
+      // The width hijack binds capture listeners (with `stopImmediatePropagation`) to a HOST node that
+      // outlives our module scope. Left standing after a kill-without-`beforeunload`, the stale
+      // listener would fire first and block both the successor's hijack and the host's own resizer.
+      this.endWidthDrag(doc)
+      this.widthResizerAbort?.abort()
+      this.widthResizerAbort = null
+      this.widthResizerEl = null
+      doc.documentElement.style.removeProperty(WIDTH_VAR)
     })
   }
 

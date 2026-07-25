@@ -6,6 +6,9 @@ import {
   type DockSettings,
   NAV_TAB,
   SettingsStore,
+  WIDTH_FOLLOW_HOST,
+  WIDTH_MAX,
+  WIDTH_MIN,
   configSignature,
   normalizeSettings,
   parseAdoptPokes,
@@ -63,20 +66,47 @@ describe('normalizeSettings', () => {
     expect(
       normalizeSettings({ adoptPoke: '  a = models.x  ', layouts: '  {"version":2,"layouts":[]}  ' }),
     ).toEqual({
+      ...DEFAULT_SETTINGS,
       activeTab: NAV_TAB,
       adoptPoke: 'a = models.x',
       layouts: '{"version":2,"layouts":[]}',
     })
     expect(normalizeSettings({ adoptPoke: '   ', layouts: '   ' })).toEqual(DEFAULT_SETTINGS)
   })
+
+  it('reads the sidebar width override, zero meaning "follow the host"', () => {
+    // The sentinel sits OUTSIDE the valid range, so a generic clamped-number reader would raise it to
+    // WIDTH_MIN and silently turn "follow the host" into a 180px sidebar nobody asked for.
+    expect(DEFAULT_SETTINGS.sidebarWidthPx).toBe(WIDTH_FOLLOW_HOST)
+    for (const raw of [{}, { sidebarWidthPx: 0 }, { sidebarWidthPx: '0' }, { sidebarWidthPx: '   ' }]) {
+      expect(normalizeSettings(raw).sidebarWidthPx).toBe(WIDTH_FOLLOW_HOST)
+    }
+    // Anything unreadable lands on the sentinel too — never on an arbitrary width.
+    for (const bad of ['not a number', Number.NaN, Number.POSITIVE_INFINITY, null, {}, []]) {
+      expect(normalizeSettings({ sidebarWidthPx: bad }).sidebarWidthPx).toBe(WIDTH_FOLLOW_HOST)
+    }
+  })
+
+  it('clamps a real sidebar width to its range and rounds it, strings included', () => {
+    // The host's own settings panel hands numbers back as strings.
+    expect(normalizeSettings({ sidebarWidthPx: 620 }).sidebarWidthPx).toBe(620)
+    expect(normalizeSettings({ sidebarWidthPx: '620' }).sidebarWidthPx).toBe(620)
+    expect(normalizeSettings({ sidebarWidthPx: '620.456' }).sidebarWidthPx).toBe(620.46)
+    expect(normalizeSettings({ sidebarWidthPx: 1 }).sidebarWidthPx).toBe(WIDTH_MIN)
+    expect(normalizeSettings({ sidebarWidthPx: -400 }).sidebarWidthPx).toBe(WIDTH_MIN)
+    expect(normalizeSettings({ sidebarWidthPx: 99_999 }).sidebarWidthPx).toBe(WIDTH_MAX)
+    // Far wider than the host's own 240–460 clamp, which is the point of the setting.
+    expect(WIDTH_MAX).toBeGreaterThan(460)
+  })
 })
 
 describe('settingsDiffer', () => {
-  it('detects a change in any of the three keys, and nothing otherwise', () => {
+  it('detects a change in any of the four keys, and nothing otherwise', () => {
     expect(settingsDiffer(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS })).toBe(false)
     expect(settingsDiffer(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, activeTab: 'l_aaaaaa' })).toBe(true)
     expect(settingsDiffer(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, adoptPoke: 'a = models.b' })).toBe(true)
     expect(settingsDiffer(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, layouts: '{"version":2,"layouts":[]}' })).toBe(true)
+    expect(settingsDiffer(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, sidebarWidthPx: 620 })).toBe(true)
   })
 
   it('is symmetric, so it can gate a write in either direction', () => {
@@ -166,6 +196,49 @@ describe('SettingsStore', () => {
     const store = new SettingsStore({ adoptPoke: 'a = models.b', layouts: '{"version":2,"layouts":[]}', activeTab: 'l_aaaaaa' })
     store.override({ adoptPoke: '', layouts: '  ', activeTab: '  ' })
     expect(store.current()).toEqual(DEFAULT_SETTINGS)
+  })
+
+  it('carries a dragged sidebar width until the echo agrees, clamping it like the echo path', () => {
+    const store = new SettingsStore({ sidebarWidthPx: WIDTH_FOLLOW_HOST })
+    store.override({ sidebarWidthPx: 620 })
+    expect(store.current().sidebarWidthPx).toBe(620)
+
+    // Still the pre-write value on the host side (`updateSettings` is fire-and-forget).
+    store.applyEcho({ sidebarWidthPx: WIDTH_FOLLOW_HOST })
+    expect(store.current().sidebarWidthPx).toBe(620)
+
+    // Once the echo agrees the override retires, so a later host-side change takes effect...
+    store.applyEcho({ sidebarWidthPx: 620 })
+    store.applyEcho({ sidebarWidthPx: 99_999 })
+    expect(store.current().sidebarWidthPx).toBe(WIDTH_MAX)
+
+    // ...and an override is clamped exactly like an echo, or it could never equal one.
+    store.override({ sidebarWidthPx: 5 })
+    expect(store.current().sidebarWidthPx).toBe(WIDTH_MIN)
+  })
+
+  it('lets the user switch the width override OFF — zero is a value, not "no change"', () => {
+    // A dropped zero would leave the seeded width standing with no way back to the host's own; a zero
+    // clamped up to WIDTH_MIN would be a phantom override no echo can ever agree with, masking every
+    // later hand edit of the setting until the plugin reloads.
+    const store = new SettingsStore({ sidebarWidthPx: 620 })
+    store.override({ sidebarWidthPx: WIDTH_FOLLOW_HOST })
+    expect(store.current().sidebarWidthPx).toBe(WIDTH_FOLLOW_HOST)
+
+    store.applyEcho({ sidebarWidthPx: WIDTH_FOLLOW_HOST })
+    store.applyEcho({ sidebarWidthPx: 800 })
+    expect(store.current().sidebarWidthPx).toBe(800)
+  })
+
+  it('keeps the width override independent of a pending config edit', () => {
+    // The width belongs to no layout, so resizing while a config write is in flight must clobber
+    // neither — the same per-key isolation that keeps `activeTab` out of the layouts blob.
+    const store = new SettingsStore()
+    const blob = serializeConfig(config({ layouts: [{ name: 'A' }] }))
+    store.override({ layouts: blob })
+    store.override({ sidebarWidthPx: 620 })
+    store.applyEcho({ sidebarWidthPx: 620 })
+    expect(store.current()).toEqual({ ...DEFAULT_SETTINGS, layouts: blob, sidebarWidthPx: 620 })
   })
 
   it('falls back to the defaults when the echo itself is garbage', () => {

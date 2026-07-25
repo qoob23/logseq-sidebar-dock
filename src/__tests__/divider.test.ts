@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { SLOT_MIN_PX, resizeWeights } from '../divider'
+import { SLOT_MIN_PX, VIEWPORT_RESERVE_PX, computeSidebarWidth, resizeWeights } from '../divider'
+import { WIDTH_MAX, WIDTH_MIN } from '../settings'
 
 const sum = (weights: readonly number[]): number => weights.reduce((total, weight) => total + weight, 0)
 
@@ -151,5 +152,65 @@ describe('resizeWeights — degenerate input', () => {
 
   it('is a no-op for a zero delta, down to the exact numbers it was given', () => {
     expect(resizeWeights([1.2345, 2.5], 0, 0, 300, 10)).toEqual([1.2345, 2.5])
+  })
+})
+
+describe('computeSidebarWidth', () => {
+  /** Wide enough that the viewport cap never binds. */
+  const WIDE = 4000
+
+  it('measures from the sidebar’s own left edge to the pointer', () => {
+    expect(computeSidebarWidth(500, 0, WIDE)).toBe(500)
+    expect(computeSidebarWidth(700, 60, WIDE)).toBe(640)
+  })
+
+  it('clamps to the default range — far past the host’s own 240–460 limit', () => {
+    // Getting past that clamp is the entire reason the host's resizer is hijacked.
+    expect(computeSidebarWidth(900, 0, WIDE)).toBe(900)
+    expect(computeSidebarWidth(10, 0, WIDE)).toBe(WIDTH_MIN)
+    expect(computeSidebarWidth(-500, 0, WIDE)).toBe(WIDTH_MIN)
+    expect(computeSidebarWidth(999_999, 0, WIDE)).toBe(WIDTH_MAX)
+  })
+
+  it('honours a custom clamp range', () => {
+    expect(computeSidebarWidth(100, 0, WIDE, 300, 700)).toBe(300)
+    expect(computeSidebarWidth(1200, 0, WIDE, 300, 700)).toBe(700)
+    expect(computeSidebarWidth(500, 0, WIDE, 300, 700)).toBe(500)
+  })
+
+  it('never lets the sidebar swallow the window', () => {
+    expect(computeSidebarWidth(1500, 0, 1000)).toBe(1000 - VIEWPORT_RESERVE_PX)
+    // The reserve only bites when it is tighter than the configured maximum.
+    expect(computeSidebarWidth(999_999, 0, 999_999)).toBe(WIDTH_MAX)
+  })
+
+  it('ignores an unmeasurable viewport instead of collapsing to the minimum', () => {
+    // "We learned nothing" is not "the window is tiny": a zero clientWidth must not shrink the drag.
+    for (const viewport of [Number.NaN, Number.POSITIVE_INFINITY, 0, -1]) {
+      expect(computeSidebarWidth(900, 0, viewport)).toBe(900)
+    }
+  })
+
+  it('falls back to the minimum in a window too small to honour the reserve', () => {
+    // The clamp range would be inverted (max < min), and `clamp` would hand back the wrong end of it.
+    expect(computeSidebarWidth(300, 0, WIDTH_MIN + VIEWPORT_RESERVE_PX - 1)).toBe(WIDTH_MIN)
+    expect(computeSidebarWidth(300, 0, 100)).toBe(WIDTH_MIN)
+    expect(computeSidebarWidth(9999, 0, 100)).toBe(WIDTH_MIN)
+  })
+
+  it('rounds to two decimals, the grid the settings normalizer rounds to', () => {
+    // An override that does not equal the value the host echoes back would never be retired.
+    expect(computeSidebarWidth(500.567, 0.1, WIDE)).toBe(500.47)
+  })
+
+  it('returns the minimum for non-finite geometry rather than a nonsense width', () => {
+    expect(computeSidebarWidth(Number.NaN, 0, WIDE)).toBe(WIDTH_MIN)
+    expect(computeSidebarWidth(500, Number.POSITIVE_INFINITY, WIDE)).toBe(WIDTH_MIN)
+    expect(computeSidebarWidth(Number.NEGATIVE_INFINITY, Number.NaN, WIDE, 300, 700)).toBe(300)
+  })
+
+  it('does not interact with the weight geometry — it sizes the column they live in', () => {
+    expect(WIDTH_MIN).toBeGreaterThan(SLOT_MIN_PX)
+    expect(VIEWPORT_RESERVE_PX).toBeGreaterThan(0)
   })
 })

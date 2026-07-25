@@ -1,4 +1,23 @@
-/** Pure divider geometry — no DOM, no host access, fully unit-testable. */
+/**
+ * Pure drag geometry — no DOM, no host access, fully unit-testable.
+ *
+ * Two independent drags live here and never interact: {@link resizeWeights} moves weight between two
+ * neighbouring slots INSIDE a layout, and {@link computeSidebarWidth} sizes the whole sidebar column
+ * the layouts sit in. The second one is global — the dock's width IS the sidebar's width, so it belongs
+ * to no layout and switching tabs never touches it.
+ */
+
+import { WIDTH_MAX, WIDTH_MIN } from './settings'
+
+/**
+ * Room the sidebar may never take from the window. {@link WIDTH_MAX} is wide enough to cover a small
+ * screen entirely, and a sidebar that has swallowed the editor leaves the user nothing to grab but the
+ * resizer it just pushed off the far edge.
+ *
+ * Exported because the stylesheet enforces the same reserve at render time (`styles.ts`): the drag-time
+ * clamp here cannot protect a width persisted on a wide monitor from a narrower window opened later.
+ */
+export const VIEWPORT_RESERVE_PX = 200
 
 /**
  * Per-slot floor in CSS px — defined HERE and imported by `styles.ts`, because both sides must agree
@@ -85,4 +104,38 @@ export function resizeWeights(
   out[index + 1] = round4(pairSum - out[index])
 
   return out
+}
+
+/**
+ * Sidebar width (px) for a pointer at `pointerX`, clamped to `[min, max]` and to what the viewport can
+ * spare ({@link VIEWPORT_RESERVE_PX}).
+ *
+ * Measured from the sidebar's own left edge rather than from the window's, so a host that ever inset
+ * the column (or a right-to-left layout) does not shift the whole range. `[min, max]` defaults to the
+ * setting's bounds, which sit far outside the host's own 240-460px clamp — the entire point of hijacking
+ * its resizer is that our geometry is not clamped the way its is.
+ *
+ * Degenerate input (a non-finite pointer or edge) yields `min`: a drag against geometry we cannot
+ * measure must never persist a nonsense width, and `min` is the one value that is certainly usable. An
+ * UNMEASURABLE viewport is different from a small one — a zero or non-finite `viewportWidth` means we
+ * learned nothing, so the reserve simply does not apply. A viewport genuinely too small to honour the
+ * reserve also falls back to `min`, because the clamp range would otherwise be inverted (`max < min`)
+ * and `clamp` would hand back the smaller of two wrong answers.
+ */
+export function computeSidebarWidth(
+  pointerX: number,
+  sidebarLeft: number,
+  viewportWidth: number,
+  min: number = WIDTH_MIN,
+  max: number = WIDTH_MAX,
+): number {
+  if (!Number.isFinite(pointerX) || !Number.isFinite(sidebarLeft)) return min
+  const capped =
+    Number.isFinite(viewportWidth) && viewportWidth > 0
+      ? Math.min(max, viewportWidth - VIEWPORT_RESERVE_PX)
+      : max
+  if (capped < min) return min
+  // Two decimals, matching `normalizeWidth`: an override that survived a drag must equal the value the
+  // host echoes back, or the override layer never retires.
+  return Math.round(clamp(pointerX - sidebarLeft, min, capped) * 100) / 100
 }

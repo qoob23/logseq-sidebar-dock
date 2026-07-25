@@ -8,23 +8,37 @@ There are no v1 users — **no migration**. Unknown legacy setting keys are simp
 ## Concepts
 
 - **Tab strip** — `Nav` (always present, fixed label, the stock navigation) plus one tab per user
-  layout. Wraps to more rows rather than overflowing into a menu.
+  layout. It rides in the **app header's left cell** (`.cp__header > .l`, the row that already carries
+  the sidebar toggle and the search button), falling back to the top of the sidebar column when that
+  cell cannot be resolved. Wrapping is placement-dependent: in the fallback column it wraps to more
+  rows rather than overflowing into a menu (there is none to overflow into); in the header row, where
+  an extra row would grow the app header itself, the tabs shrink and ellipsize instead.
 - **Layout** — a short user-supplied name, an axis, and an ordered list of slots.
 - **Slot** — a stable id, a weight, and a source (nothing / a plugin / a renderer macro).
 
 ## Storage
 
-Three flat `useSettingsSchema` keys:
+Four flat `useSettingsSchema` keys:
 
 | key | type | meaning |
 | --- | --- | --- |
 | `activeTab` | string | `'nav'` or a layout id |
 | `adoptPoke` | string | unchanged from v1 |
 | `layouts` | string | canonical JSON of `DockConfig` |
+| `sidebarWidthPx` | number | sidebar width forced on every tab, `180`–`1600`; `0` = follow the host |
 
 `activeTab` stays OUT of the JSON blob deliberately: it is rewritten on every tab click, and
 `SettingsStore`'s override layer is per key — keeping it separate stops a tab flip from clobbering a
 config edit whose host echo has not arrived yet.
+
+`sidebarWidthPx` is flat for the same reason and one more: the width is **global, not per layout** —
+the dock's width *is* the sidebar's width, so one remembered value is what keeps a tab flip from
+relayouting the main content behind it. **Zero is the "no override" sentinel** because it sits outside
+the valid range and is not a width anyone could want: it needs its own normalizer (`normalizeWidth`),
+since a generic clamped-number reader would raise `0` to the minimum and silently turn "follow the
+host" into a 180px sidebar with no way back. Zero has to survive the patch path too — dropped as "no
+change" it could never be switched off, and clamped up it would become a phantom override no host echo
+can agree with, masking every later hand edit of the key.
 
 Gone: `mode`, `viewTop`, `viewBottom`, `macroTop`, `macroBottom`, `splitPct`.
 
@@ -91,25 +105,46 @@ would make every host echo read as a change and drive a self-sustaining assert l
 
 ## DOM shape
 
-The `provideUI` template shrinks to a static shell:
+**Two `provideUI` injections**, because the strip and the dock land in two different host components:
 
 ```html
+<!-- #<pid>--tabs, in `.cp__header > .l` (fallback: the sidebar column) -->
 <div class="sdock-tabs"></div>
+
+<!-- #<pid>--dock, appended to the sidebar column -->
 <div class="sdock-layouts"></div>
 ```
 
-Everything below it — tabs, layout roots, slots, dividers, edit controls — is **built and reconciled
+Two subtrees means **two independent health checks**. The dock's is "attached and still holding
+`.sdock-layouts`" — it says nothing about the strip, or a header that has not rendered yet would
+condemn a live dock to a re-injection that wipes every slot it holds. The strip's is "intact **and
+standing in the row we want it in right now**", because the header cell can arrive after our first
+assert and nothing else would move the strip back up to it. The MutationObserver re-asserts when
+either goes down, and therefore also when the header cell finally appears.
+
+Re-injecting does NOT move a misplaced container: `setupInjectedUI` only rewrites an existing
+`#<id>`'s innerHTML. So a strip standing in the wrong row is torn down first — the host's own
+`_forceCleanInjectedUI` (which also retires the libs-side effect), and then, if a node with that id is
+still standing, a manual `remove()`. Its return value is about the CALL, not the node, and it removes
+the node from its *creation-time* parent, which is exactly the parent that is wrong here; believing it
+leaves the placement stuck and the observer re-asserting forever.
+
+Everything below them — tabs, layout roots, slots, dividers, edit controls — is **built and reconciled
 in the host realm with `doc.createElement`**, the pattern already used for placeholders, overlays and
 macro wrappers. Three things follow:
 
 1. No DOMPurify exposure, so `<select>`/`<input>` controls are safe to use.
 2. A config change never re-injects the template, so **adding or removing a slot cannot disturb the
    mounts of the slots that stayed** — reconcile children in place, keyed by slot id.
-3. `isHealthy` checks for the two shell children (plus that they are still ours).
+3. The health checks look for the shell child of each container. Reconciliation is scoped to the
+   container it is given: the strip reconciler never climbs to a parent it would share with the layout
+   roots, since it does not have one.
 
-Host delegation reaches these nodes: `setupInjectedUI` binds one listener per event type on the
-injected container and dispatches via `target.closest('[data-on-<type>]')`, so nodes added later are
-covered. It is bound for `click`, `change`, `input`, `keydown`, `contextmenu` and more — **not click
+Host delegation reaches these nodes: `setupInjectedUI` binds one listener per event type **per
+injected container** and dispatches via `target.closest('[data-on-<type>]')`, so nodes added later are
+covered — and the strip's own container is bound the same way, so the tabs, the gear and the
+add-layout button reach the same `provideModel` names from either placement. It is bound for `click`,
+`change`, `input`, `keydown`, `contextmenu` and more — **not click
 only** — and the model receives `{ type, value, id, className, dataset }` built from the trigger
 element by `transformableEvent`. That `{ value, dataset }` pair is the entire channel: models get no
 element reference, so every control carries its target in `data-*` (e.g. `data-slot-id`).
@@ -176,20 +211,40 @@ Still one keyed `provideStyle` sheet, still the only place persistent layout may
   on our own layout root (the one inline style the host gotchas allow, because the node is ours), then
   `provideStyle` bakes the new weights and the inline vars are dropped once the sheet has provably
   landed. The v1 `splitVarFallback` probe becomes a marker line the builder emits and the dock checks
-  for, e.g. `/* sdock-sig: <canonical weights + activeTab> */` — both sides must agree on the exact
-  text, so it stays one exported function.
+  for, e.g. `/* sdock-sig: <canonical weights + activeTab + sidebarWidthPx> */` — both sides must agree
+  on the exact text, so it stays one exported function. The width is in the marker rather than probed
+  separately because it can be the only thing that changed: a sidebar resize moves no weight at all.
+- The sidebar-width override is one `!important` rule on `html:has(main.ls-left-sidebar-open)` — see
+  the storage table above and `divider.ts`'s `computeSidebarWidth`/`VIEWPORT_RESERVE_PX`.
 - `hostedViewRules(pid)` is emitted for every pid across **all** layouts.
-- Tab strip: `flex-wrap: wrap`, tabs content-sized (`flex: 0 1 auto` — v1's `flex: 1 1 0` stretches
-  absurdly once the sidebar can be widened), active tab matched on `[data-tab="<activeTab>"]`.
+- Tab strip: tabs content-sized but shrinkable (`flex: 0 1 auto` — v1's `flex: 1 1 0` stretches
+  absurdly once the sidebar can be widened; the shrink half is what makes them ellipsize in the header
+  row). The gear and the add-layout button are exempted back to `flex: 0 0 auto`: an ellipsized tab is
+  still readable, a clipped one-glyph button is gone, and those two are the only way into edit mode —
+  and, with nothing configured, to a first tab. Active tab matched on `[data-tab="<activeTab>"]` — on
+  the button alone, never scoped to a container, or the fallback placement would lose the highlight.
+  Both placements are emitted
+  unconditionally (which row is in force is a host-DOM fact the dock discovers at assert time, not a
+  builder input): header cell `flex: 1 1 0` with basis zero so it takes the leftover room rather than
+  widening the cell, fallback `order: -2; flex: 0 0 auto` plus `flex-wrap: wrap`. The strip also opts
+  out of the header's window drag region (`-webkit-app-region: no-drag`; the host exempts only
+  `a`/`svg`/`button`), overrides the header's outsized font-size, and hides itself under
+  `main:not(.ls-left-sidebar-open)` — a closed sidebar has no face to switch.
+- Nav face: the whole dock container is hidden, now that the strip no longer lives in it. Hidden is
+  never unmounted, so docked iframes keep running. The one carve-out is
+  `:not(:has(.sdock-config-error))`: while the JSON does not parse every edit is refused, and the tab
+  a user would flip to in order to read why is named by that same broken configuration.
 - Keep unchanged: the `.nav-contents-container` height override, nav hiding while a layout tab is
   active, the `:where(iframe) { margin: 0 }` neutral-environment carve-out, and both drag-passthrough
   rules.
-- Edit mode adds rules under a `.sdock-editing` class on our container.
+- Edit mode adds rules under a `.sdock-editing` class, set on **both** our containers.
 
 ## Edit mode
 
 A gear in the tab strip toggles it. State is in-memory on `Dock` (not persisted) — it is a mode, not
-a preference. Every control is a host-realm node carrying its target in `data-*`:
+a preference — and is pushed onto **both** injected containers as a class, since the gear that raises
+when it is on stands in the strip while the editbar and per-slot panels it reveals are in the dock.
+Every control is a host-realm node carrying its target in `data-*`:
 
 | control | event attr | model | payload |
 | --- | --- | --- | --- |
