@@ -3,15 +3,19 @@
  *
  * Everything persistent lives here: the host wipes inline styles written onto its own nodes on every
  * React re-render, while the injected `<style data-injected-style=...>` element survives until unload.
+ * That includes the nav/views mode switch — the two faces of the sidebar are shown and hidden purely
+ * by re-providing this sheet, so nothing ever unmounts (a hidden docked iframe keeps running).
  */
+
+import { type DockMode } from './settings'
 
 export interface DockCssOptions {
   /** Our plugin id — the injected container is `#<pluginId>--dock`. */
   pluginId: string
+  /** Which face of the sidebar the segmented control has selected. */
+  mode: DockMode
   /** Share (%) of the dock height given to the top slot. */
   splitPct: number
-  /** Share (%) of the sidebar column given to the whole dock. */
-  dockPct: number
   /** Plugin ids whose `#<pid>_lsp_main` container we adopt into a slot. */
   hostedPids: string[]
 }
@@ -66,6 +70,35 @@ ${sel} {
 }`
 }
 
+/**
+ * The nav/views switch. Both faces stay mounted at all times — `display: none` keeps a docked plugin's
+ * iframe alive, whereas removing it from the DOM would make Chromium reload it.
+ */
+function modeRules(dockId: string, mode: DockMode): string {
+  if (mode === 'nav') {
+    return `/* nav mode: the stock navigation owns the column, the dock shrinks to its tabs. */
+${dockId} {
+  flex: 0 0 auto;
+}
+
+${dockId} .sdock-root {
+  display: none;
+}`
+  }
+
+  return `/* views mode: the dock takes the whole column and the stock navigation steps aside. */
+${dockId} {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#left-sidebar .left-sidebar-inner > .wrap > nav.cp__menubar-repos,
+#left-sidebar .left-sidebar-inner > .wrap > .nav-contents-container,
+#left-sidebar .left-sidebar-inner > .wrap > footer.create {
+  display: none !important;
+}`
+}
+
 /** The complete stylesheet for the keyed `provideStyle` sheet. */
 export function buildDockCss(opts: DockCssOptions): string {
   const dockId = `#${escapeIdent(opts.pluginId)}--dock`
@@ -81,7 +114,8 @@ export function buildDockCss(opts: DockCssOptions): string {
 }
 
 ${dockId} {
-  flex: 0 0 ${opts.dockPct}%;
+  /* We are appended last (after footer.create) but belong at the top of the column. */
+  order: -1;
   min-height: 0;
   position: relative;
   overflow: hidden;
@@ -89,11 +123,55 @@ ${dockId} {
   flex-direction: column;
 }
 
+${modeRules(dockId, opts.mode)}
+
+/* Segmented control: rounded track, active segment raised as a chip. */
+.sdock-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  margin: 2px 8px 6px;
+  padding: 2px;
+  border-radius: var(--ls-border-radius-medium, 8px);
+  background: var(--ls-tertiary-background-color, rgba(127, 127, 127, 0.14));
+}
+
+.sdock-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: calc(var(--ls-border-radius-medium, 8px) - 2px);
+  background: transparent;
+  color: var(--ls-secondary-text-color, inherit);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.75;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.sdock-tab:hover {
+  opacity: 1;
+}
+
+.sdock-tab[data-tab='${opts.mode}'] {
+  background: var(--ls-secondary-background-color, rgba(255, 255, 255, 0.9));
+  color: var(--ls-primary-text-color, inherit);
+  opacity: 1;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
+}
+
+/* Sits below the tabs and takes whatever height the mode left for it. */
 .sdock-root {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   width: 100%;
-  height: 100%;
   min-height: 0;
 }
 

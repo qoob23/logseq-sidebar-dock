@@ -5,8 +5,8 @@ import '@logseq/libs'
 import { Dock } from './dock'
 import { getInstalledPluginIds } from './logseq-types'
 import {
-  DOCK_MAX,
-  DOCK_MIN,
+  DOCK_MODES,
+  type DockMode,
   NO_VIEW,
   SPLIT_MAX,
   SPLIT_MIN,
@@ -32,6 +32,15 @@ function main(): void {
 
     logseq.useSettingsSchema([
       {
+        key: 'mode',
+        type: 'enum',
+        default: settings.mode,
+        title: 'Sidebar face',
+        description: 'Which face the sidebar shows. The Nav/Views control at the top of the sidebar sets this too.',
+        enumChoices: [...DOCK_MODES],
+        enumPicker: 'radio',
+      },
+      {
         key: 'viewTop',
         type: 'enum',
         default: settings.viewTop,
@@ -56,19 +65,37 @@ function main(): void {
         title: 'Divider position (%)',
         description: `Share of the dock given to the top view (${SPLIT_MIN}–${SPLIT_MAX}). Also set by dragging the divider.`,
       },
-      {
-        key: 'dockPct',
-        type: 'number',
-        default: settings.dockPct,
-        title: 'Dock height (%)',
-        description: `Share of the left sidebar given to the whole dock (${DOCK_MIN}–${DOCK_MAX}).`,
-      },
     ])
   }
 
   applySchema()
 
   const dock = new Dock(pluginId, store, applySchema)
+
+  /**
+   * Flip the sidebar face. The override repaints immediately; `updateSettings` only catches the
+   * persisted value up ~0.5–1s later, and its echo then agrees with the override and drops it.
+   */
+  const setMode = (mode: DockMode): void => {
+    if (store.current().mode === mode) return
+    store.override({ mode })
+    dock.refreshStyle()
+    logseq.updateSettings({ mode })
+    // Revealing the views: re-assert so a stale placeholder (missing-view watch expired, or the plugin
+    // showed up without a lifecycle event) heals on the flip instead of staying wrong until reload.
+    if (mode === 'views') void dock.assert()
+  }
+
+  // Registered BEFORE the container is injected: `provideUI`'s delegation resolves `data-on-click`
+  // against this model.
+  logseq.provideModel({
+    sdockShowNav: () => {
+      setMode('nav')
+    },
+    sdockShowViews: () => {
+      setMode('views')
+    },
+  })
 
   // `updateSettings` is fire-and-forget; this echo (~0.5–1s later) is the authoritative base.
   logseq.onSettingsChanged<unknown>((next) => {

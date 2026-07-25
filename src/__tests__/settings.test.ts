@@ -2,8 +2,6 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_SETTINGS,
-  DOCK_MAX,
-  DOCK_MIN,
   NO_VIEW,
   SPLIT_MAX,
   SPLIT_MIN,
@@ -26,10 +24,10 @@ describe('normalizeSettings', () => {
 
   it('ignores fields of the wrong type and empty strings', () => {
     const out = normalizeSettings({
+      mode: 17,
       viewTop: 17,
       viewBottom: '   ',
       splitPct: 'not a number',
-      dockPct: Number.NaN,
     })
     expect(out).toEqual(DEFAULT_SETTINGS)
   })
@@ -37,33 +35,33 @@ describe('normalizeSettings', () => {
   it('keeps valid values and trims plugin ids', () => {
     expect(
       normalizeSettings({
+        mode: 'views',
         viewTop: '  logseq-plugin-a  ',
         viewBottom: 'logseq-plugin-b',
         splitPct: 33,
-        dockPct: 55,
       }),
     ).toEqual({
+      mode: 'views',
       viewTop: 'logseq-plugin-a',
       viewBottom: 'logseq-plugin-b',
       splitPct: 33,
-      dockPct: 55,
     })
   })
 
+  it('falls back to nav for an unknown mode', () => {
+    expect(normalizeSettings({ mode: 'nonsense' }).mode).toBe('nav')
+    expect(normalizeSettings({ mode: '' }).mode).toBe('nav')
+    expect(normalizeSettings({ mode: null }).mode).toBe('nav')
+    expect(normalizeSettings({ mode: ' views ' }).mode).toBe('views')
+  })
+
   it('accepts numeric strings', () => {
-    const out = normalizeSettings({ splitPct: '61.5', dockPct: '25' })
-    expect(out.splitPct).toBe(61.5)
-    expect(out.dockPct).toBe(25)
+    expect(normalizeSettings({ splitPct: '61.5' }).splitPct).toBe(61.5)
   })
 
   it('clamps splitPct to its range', () => {
     expect(normalizeSettings({ splitPct: -100 }).splitPct).toBe(SPLIT_MIN)
     expect(normalizeSettings({ splitPct: 1000 }).splitPct).toBe(SPLIT_MAX)
-  })
-
-  it('clamps dockPct to its range', () => {
-    expect(normalizeSettings({ dockPct: 0 }).dockPct).toBe(DOCK_MIN)
-    expect(normalizeSettings({ dockPct: 99 }).dockPct).toBe(DOCK_MAX)
   })
 
   it('ignores unrelated keys such as the host-managed `disabled` flag', () => {
@@ -74,6 +72,7 @@ describe('normalizeSettings', () => {
 describe('settingsDiffer', () => {
   it('detects a change in any field', () => {
     expect(settingsDiffer(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS })).toBe(false)
+    expect(settingsDiffer(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, mode: 'views' })).toBe(true)
     expect(settingsDiffer(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, viewTop: 'x' })).toBe(true)
     expect(settingsDiffer(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, splitPct: 60 })).toBe(true)
   })
@@ -113,15 +112,32 @@ describe('SettingsStore', () => {
 
   it('clamps overridden numbers', () => {
     const store = new SettingsStore()
-    store.override({ splitPct: 999, dockPct: -5 })
+    store.override({ splitPct: 999 })
     expect(store.current().splitPct).toBe(SPLIT_MAX)
-    expect(store.current().dockPct).toBe(DOCK_MIN)
   })
 
   it('ignores undefined and non-finite fields in a patch', () => {
     const store = new SettingsStore({ splitPct: 42 })
-    store.override({ splitPct: undefined, dockPct: Number.NaN })
+    store.override({ splitPct: Number.NaN })
+    store.override({ splitPct: undefined })
     expect(store.current()).toEqual({ ...DEFAULT_SETTINGS, splitPct: 42 })
+  })
+
+  it('flips the mode instantly and keeps it until the echo catches up', () => {
+    const store = new SettingsStore({ mode: 'nav' })
+    store.override({ mode: 'views' })
+    expect(store.current().mode).toBe('views')
+
+    // The host is still echoing the pre-write value.
+    store.applyEcho({ mode: 'nav' })
+    expect(store.current().mode).toBe('views')
+
+    store.applyEcho({ mode: 'views' })
+    expect(store.current().mode).toBe('views')
+
+    // Override dropped, so the settings UI can switch it back.
+    store.applyEcho({ mode: 'nav' })
+    expect(store.current().mode).toBe('nav')
   })
 
   it('trims overridden plugin ids and ignores blank ones, like the echo path', () => {

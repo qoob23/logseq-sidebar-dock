@@ -11,28 +11,31 @@ export const NO_VIEW = 'none'
 
 export const SPLIT_MIN = 15
 export const SPLIT_MAX = 85
-export const DOCK_MIN = 20
-export const DOCK_MAX = 70
+
+/** Which of the two sidebar faces the segmented control has selected. */
+export type DockMode = 'nav' | 'views'
+
+export const DOCK_MODES: readonly DockMode[] = ['nav', 'views']
 
 export interface DockSettings {
+  /** `nav` = stock navigation full height; `views` = the two docked views full height. */
+  mode: DockMode
   /** Plugin id hosted in the top slot, or {@link NO_VIEW}. */
   viewTop: string
   /** Plugin id hosted in the bottom slot, or {@link NO_VIEW}. */
   viewBottom: string
   /** Share (%) of the dock height given to the top slot. */
   splitPct: number
-  /** Share (%) of the left-sidebar column given to the whole dock. */
-  dockPct: number
 }
 
 export const DEFAULT_SETTINGS: DockSettings = {
+  mode: 'nav',
   viewTop: NO_VIEW,
   viewBottom: NO_VIEW,
   splitPct: 50,
-  dockPct: 40,
 }
 
-const SETTINGS_KEYS = ['viewTop', 'viewBottom', 'splitPct', 'dockPct'] as const
+const SETTINGS_KEYS = ['mode', 'viewTop', 'viewBottom', 'splitPct'] as const
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -79,20 +82,31 @@ function readNumber(
   return round2(clamp(parsed, min, max))
 }
 
+/** Anything that is not exactly a known mode falls back to the default (`nav`). */
+function readMode(source: Record<string, unknown> | null): DockMode {
+  const value = source?.['mode']
+  if (typeof value !== 'string') return DEFAULT_SETTINGS.mode
+  const mode = value.trim()
+  return DOCK_MODES.find((known) => known === mode) ?? DEFAULT_SETTINGS.mode
+}
+
 /** Coerce anything the host hands back into a complete, in-range {@link DockSettings}. */
 export function normalizeSettings(raw: unknown): DockSettings {
   const source = asRecord(raw)
   return {
+    mode: readMode(source),
     viewTop: readString(source, 'viewTop', DEFAULT_SETTINGS.viewTop),
     viewBottom: readString(source, 'viewBottom', DEFAULT_SETTINGS.viewBottom),
     splitPct: readNumber(source, 'splitPct', DEFAULT_SETTINGS.splitPct, SPLIT_MIN, SPLIT_MAX),
-    dockPct: readNumber(source, 'dockPct', DEFAULT_SETTINGS.dockPct, DOCK_MIN, DOCK_MAX),
   }
 }
 
 /** Clean a partial patch exactly the way {@link normalizeSettings} cleans a full settings object. */
 function normalizePatch(patch: Partial<DockSettings>): Partial<DockSettings> {
   const out: Partial<DockSettings> = {}
+  if (patch.mode !== undefined) {
+    out.mode = DOCK_MODES.find((known) => known === patch.mode) ?? DEFAULT_SETTINGS.mode
+  }
   if (patch.viewTop !== undefined) {
     const id = cleanId(patch.viewTop)
     if (id !== null) out.viewTop = id
@@ -103,9 +117,6 @@ function normalizePatch(patch: Partial<DockSettings>): Partial<DockSettings> {
   }
   if (patch.splitPct !== undefined && Number.isFinite(patch.splitPct)) {
     out.splitPct = round2(clamp(patch.splitPct, SPLIT_MIN, SPLIT_MAX))
-  }
-  if (patch.dockPct !== undefined && Number.isFinite(patch.dockPct)) {
-    out.dockPct = round2(clamp(patch.dockPct, DOCK_MIN, DOCK_MAX))
   }
   return out
 }

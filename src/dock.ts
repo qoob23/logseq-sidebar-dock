@@ -30,7 +30,16 @@ const DOCK_PATH = '#left-sidebar .left-sidebar-inner > .wrap'
 /** Toggled on our own container while a drag is in flight (see {@link Dock.installDragPassthrough}). */
 const DRAGGING_CLASS = 'sdock-dragging'
 
+/**
+ * `data-on-<event>` is `setupInjectedUI`'s own delegation: the host binds one listener on the container
+ * and routes clicks to the model registered with `logseq.provideModel`. It is re-bound whenever the
+ * container is re-created and survives the idempotent innerHTML rewrite, so we never bind clicks here.
+ */
 const TEMPLATE = [
+  '<div class="sdock-tabs">',
+  '<button class="sdock-tab" data-tab="nav" data-on-click="sdockShowNav">Nav</button>',
+  '<button class="sdock-tab" data-tab="views" data-on-click="sdockShowViews">Views</button>',
+  '</div>',
   '<div class="sdock-root">',
   '<div class="sdock-slot" data-slot="top"></div>',
   '<div class="sdock-divider" title="Drag to resize"></div>',
@@ -74,9 +83,10 @@ function sleep(ms: number): Promise<void> {
   })
 }
 
-/** Our container counts as healthy only when it is attached AND still holds our markup. */
+/** Our container counts as healthy only when it is attached AND still holds our whole markup. */
 function isHealthy(el: HTMLElement | null): el is HTMLElement {
-  return el !== null && el.isConnected && el.querySelector('.sdock-root') !== null
+  if (el === null || !el.isConnected) return false
+  return el.querySelector('.sdock-tabs') !== null && el.querySelector('.sdock-root') !== null
 }
 
 export class Dock {
@@ -249,14 +259,22 @@ export class Dock {
     return [viewTop, viewBottom].filter((pid) => pid !== NO_VIEW)
   }
 
+  /**
+   * Re-publish the stylesheet — the whole nav/views switch is a stylesheet swap, so this is all a mode
+   * flip needs. Public so the segmented control can repaint instantly, ahead of the settings echo.
+   */
+  refreshStyle(): void {
+    this.provideStyle()
+  }
+
   private provideStyle(): void {
-    const { splitPct, dockPct } = this.store.current()
+    const { mode, splitPct } = this.store.current()
     logseq.provideStyle({
       key: STYLE_KEY,
       style: buildDockCss({
         pluginId: this.pluginId,
+        mode,
         splitPct,
-        dockPct,
         hostedPids: this.hostedPids(),
       }),
     })
