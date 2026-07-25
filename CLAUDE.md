@@ -51,8 +51,8 @@ Everything pure is unit-tested in `src/__tests__/`; the host seams need a live L
 ## Logseq host source & research
 
 The **Logseq 0.10.x host source** (the `logseq/og` file-graph codebase — NOT `logseq/logseq`) is checked out at
-**`/Users/svetozar/personal/synapses/soft/og`** and is indexed in **codebase-memory-mcp as project
-`synapses-og`**. Explore it through **codebase-memory-mcp first**, not grep.
+**`~/soft/logseq/og`** (sibling of this repo: `../og`) and is indexed in **codebase-memory-mcp as
+project `logseq-og`**. Explore it through **codebase-memory-mcp first**, not grep.
 
 Key files (under `src/main/frontend|logseq`):
 
@@ -65,7 +65,7 @@ Key files (under `src/main/frontend|logseq`):
 
 Grep `node_modules/@logseq/libs/dist/LSPlugin.d.ts` for exact SDK types instead of guessing the API — until
 this repo is scaffolded there is no local copy, so read
-**`/Users/svetozar/personal/synapses/node_modules/@logseq/libs/dist/LSPlugin.d.ts`**.
+**`~/soft/logseq/synapses/node_modules/@logseq/libs/dist/LSPlugin.d.ts`**.
 
 ## Host gotchas
 
