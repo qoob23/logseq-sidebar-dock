@@ -10,9 +10,40 @@ segmented **Nav / Views** control pinned at the top of the sidebar:
 Switching faces is a stylesheet swap, so a docked view is only hidden, never unmounted — iframes keep
 running (and keep their scroll position and state) while you are on the Nav face.
 
-The dock adopts another plugin's main UI (`#<plugin-id>_lsp_main`) into a slot — the plugin keeps running,
-it just renders inside the sidebar. Nothing is destroyed: on unload, or when you change the selection,
-every adopted node is handed back to the host.
+## How a view gets into a slot
+
+Two strategies, tried in order per plugin (the outcome is cached for the session and re-probed
+whenever that plugin is installed, reloaded, enabled or disabled):
+
+1. **Embed Protocol v1** (`docs/embed-protocol.md`) — we call the plugin's `embedMount` model and it
+   injects its own view into our slot. Nothing is re-parented, so nothing reloads, and plugins whose
+   view is not their main UI work too. Success is detected from the DOM (`data-embed-owner`), because
+   the RPC has no reply channel.
+2. **Main-UI adoption** — the legacy fallback: we re-parent `#<plugin-id>_lsp_main` into the slot.
+   Chromium reloads a moved iframe, so the plugin reboots once. If its main UI is still empty after
+   the reboot grace period, the slot shows a diagnosis over it (the view is left docked — moving it
+   again would only cause another reload).
+
+Nothing is destroyed: on unload, or when you change the selection, adopted nodes are handed back to the
+host and providers get an `embedUnmount`.
+
+**If the provider moves the view elsewhere** (its own sidebar or a popout — protocol providers with a
+single-instance view are "last mount wins"), the slot shows *"View is open in another surface"* with a
+**Reclaim** button. The dock never steals the view back on its own; clicking Reclaim does.
+
+## Slot layout
+
+The dock shows only the slots you configured:
+
+| Top view | Bottom view | Dock |
+|---|---|---|
+| set | set | both slots, divider between them at **Divider position** |
+| set | `none` | the top view fills the dock, no divider |
+| `none` | set | the bottom view fills the dock, no divider |
+| `none` | `none` | one slot with the "no view selected" hint |
+
+**Divider position** is remembered while a single view fills the dock — it just does not apply, and
+comes back as soon as both slots are configured again.
 
 ## Build
 
@@ -45,17 +76,17 @@ Plugins → **Sidebar Dock** → ⚙ **Settings**:
 | Setting | Meaning |
 |---|---|
 | **Sidebar face** | `nav` or `views` — same thing the segmented control sets. |
-| **Top view** | Plugin whose main UI is docked in the upper slot (`none` = empty). |
-| **Bottom view** | Plugin whose main UI is docked in the lower slot (`none` = empty). |
-| **Divider position (%)** | Share of the dock given to the top view (15–85). Dragging the divider writes this. |
+| **Top view** | Plugin shown in the upper slot (`none` = unconfigured). |
+| **Bottom view** | Plugin shown in the lower slot (`none` = unconfigured). |
+| **Divider position (%)** | Share of the dock given to the top view (15–85), when both slots are configured. Dragging the divider writes this. |
 
 The dropdowns list every registered plugin and refresh themselves when plugins are installed, enabled,
 disabled, or reloaded (reopen the settings pane to see the updated list). A docked plugin that reloads is
-re-adopted automatically.
+re-mounted automatically.
 
 Notes:
 
-- A plugin's main UI is a single DOM node, so the same plugin cannot fill both slots — the bottom slot
-  falls back to a placeholder if you pick the same one twice.
-- Plugins without an iframe main UI (shadow-mode plugins, or plugins that only add toolbar items) show a
-  placeholder instead. Docking a plugin moves its iframe, which makes Chromium reload it once.
+- A plugin's view is a single instance, so the same plugin cannot fill both slots — picking it twice
+  leaves the bottom slot unconfigured.
+- A plugin that supports neither the embed protocol nor main-UI adoption (shadow-mode plugins, or
+  plugins that only add toolbar items) shows an explanatory placeholder.

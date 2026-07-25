@@ -4,15 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`logseq-sidebar-dock` — a **Logseq** plugin that restructures the **LEFT sidebar** into two vertical sections:
-the default navigation on top, and a **dock pane** below hosting **two user-selectable plugin views**, with a
-**user-adjustable vertical divider between those two hosted views**. Plain **TypeScript**. Target is the
-**0.10.x Markdown/file graph**, NOT the DB version. The repo is **empty** — nothing below describes existing
-code except where marked as such.
+`logseq-sidebar-dock` — a **Logseq** plugin that gives the **LEFT sidebar** two faces, switched by a
+segmented **Nav / Views** control injected at the top of the sidebar: the stock navigation, or a **dock**
+filling the whole sidebar with **two user-selectable plugin views** and a **user-adjustable divider between
+them**. Plain **TypeScript**. Target is the **0.10.x Markdown/file graph**, NOT the DB version.
+
+## Source layout (implemented)
+
+- `src/main.ts` — entry: settings schema (re-published on plugin-registry events), `provideModel`
+  handlers for the tab and Reclaim buttons, echo wiring, `beforeunload`.
+- `src/dock.ts` — every host seam: `provideUI` injection + re-assertion, divider drag, drag
+  passthrough, slot mounting (embed protocol → main-UI adoption → placeholder), host-document
+  cleanup handle.
+- `src/embed.ts` — **pure** Embed Protocol v1 host logic (see `docs/embed-protocol.md`): payloads,
+  slot ids, wipe-vs-eviction discriminator, strategy cache, "is this main UI empty?" predicate.
+- `src/styles.ts` — **pure** builder for the whole keyed `provideStyle` sheet: mode, slot layout,
+  segmented control, hosted-view `!important` overrides.
+- `src/settings.ts` / `src/divider.ts` — **pure** settings normalization + override store, and divider
+  geometry. `src/logseq-types.ts` — typed model of the untyped host surfaces.
+
+Everything pure is unit-tested in `src/__tests__/`; the host seams need a live Logseq.
 
 ## Commands
-
-> Tooling is **not scaffolded yet** — this is the intended setup (single package, no monorepo).
 
 - **`npm run build`** — `vite` → `dist/` (must contain the `index.html` referenced by `logseq.main`).
   `npm run dev` watches; **reload the plugin after every rebuild** (see below).

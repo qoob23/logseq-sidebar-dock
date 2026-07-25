@@ -1,14 +1,18 @@
 import { describe, expect, it } from 'vitest'
 
-import { type DockCssOptions, buildDockCss, splitVarFallback } from '../styles'
+import { EMBED_OWNER_ATTR } from '../embed'
+import { NO_VIEW } from '../settings'
+import { type DockCssOptions, buildDockCss, resolveLayout, splitVarFallback } from '../styles'
 
 const OPTS: DockCssOptions = {
   pluginId: 'logseq-sidebar-dock',
   mode: 'nav',
   splitPct: 42,
-  hostedPids: ['logseq-plugin-a', 'logseq-plugin-b'],
+  viewTop: 'logseq-plugin-a',
+  viewBottom: 'logseq-plugin-b',
 }
 
+const HOSTED_PIDS = [OPTS.viewTop, OPTS.viewBottom]
 const VIEWS: DockCssOptions = { ...OPTS, mode: 'views' }
 
 /** The three host-nav elements views mode hides. */
@@ -17,6 +21,35 @@ const HOST_NAV_SELECTORS = [
   '#left-sidebar .left-sidebar-inner > .wrap > .nav-contents-container',
   '#left-sidebar .left-sidebar-inner > .wrap > footer.create',
 ]
+
+/** Bodies of every rule whose selector list is exactly `selector`. */
+function ruleBlocks(css: string, selector: string): string[] {
+  return css
+    .split('\n')
+    .map((line, index) => (line.trim() === `${selector} {` ? index : -1))
+    .filter((index) => index !== -1)
+    .map((index) => {
+      const rest = css.split('\n').slice(index + 1)
+      return rest.slice(0, rest.indexOf('}')).join('\n')
+    })
+}
+
+/** The block that hides one slot plus the divider, or '' when the layout hides nothing. */
+const HIDE_MARKER = '.sdock-divider {\n  display: none;\n}'
+function hideBlock(css: string): string {
+  const end = css.indexOf(HIDE_MARKER)
+  if (end === -1) return ''
+  return css.slice(css.lastIndexOf(".sdock-slot[data-slot='", end), end)
+}
+
+describe('resolveLayout', () => {
+  it('maps the selection to the slots that are actually shown', () => {
+    expect(resolveLayout('a', 'b')).toBe('both')
+    expect(resolveLayout('a', NO_VIEW)).toBe('top-only')
+    expect(resolveLayout(NO_VIEW, 'b')).toBe('bottom-only')
+    expect(resolveLayout(NO_VIEW, NO_VIEW)).toBe('empty')
+  })
+})
 
 describe('buildDockCss', () => {
   it('keeps the nav container unlocked in both modes', () => {
@@ -50,7 +83,7 @@ describe('buildDockCss', () => {
 
   it('emits the !important overrides for every hosted plugin main UI', () => {
     const css = buildDockCss(OPTS)
-    for (const pid of OPTS.hostedPids) {
+    for (const pid of HOSTED_PIDS) {
       const sel = `.sdock-slot #${pid}_lsp_main`
       expect(css).toContain(sel)
       const block = css.slice(css.indexOf(sel), css.indexOf('}', css.indexOf(sel)))
@@ -64,36 +97,57 @@ describe('buildDockCss', () => {
     }
   })
 
-  it('beats the ~300px inline-wrapper fallback for any iframe in a slot', () => {
+  it('beats the ~300px inline-wrapper fallback for an ADOPTED iframe', () => {
     const css = buildDockCss(OPTS)
-    const sel = '.sdock-slot iframe'
-    const block = css.slice(css.indexOf(sel), css.indexOf('}', css.indexOf(sel)))
-    expect(block).toContain('position: absolute')
-    expect(block).toContain('width: 100% !important')
-    expect(block).toContain('height: 100% !important')
+    for (const pid of HOSTED_PIDS) {
+      const sel = `.sdock-slot #${pid}_lsp_main iframe`
+      expect(css).toContain(sel)
+      const block = css.slice(css.indexOf(sel), css.indexOf('}', css.indexOf(sel)))
+      expect(block).toContain('position: absolute')
+      expect(block).toContain('width: 100% !important')
+      expect(block).toContain('height: 100% !important')
+    }
+  })
+
+  it('never restyles the geometry of an iframe a provider owns (protocol host rule 6)', () => {
+    const css = buildDockCss(OPTS)
+    // The only unscoped `.sdock-slot iframe` rule left is the transient drag passthrough, which
+    // suspends pointer events and touches no geometry.
+    for (const block of ruleBlocks(css, '.sdock-slot iframe')) {
+      expect(block).toContain('pointer-events: none !important')
+      expect(block).not.toContain('position:')
+      expect(block).not.toContain('width:')
+      expect(block).not.toContain('height:')
+      expect(block).not.toContain('inset:')
+    }
+    // ...and no selector anywhere in the sheet reaches for a provider-owned subtree.
+    const selectorLines = css
+      .split('\n')
+      .filter((line) => line.trim().endsWith('{') || line.trim().endsWith(','))
+    expect(selectorLines.some((line) => line.includes(EMBED_OWNER_ATTR))).toBe(false)
   })
 
   it('deduplicates hosted plugin ids', () => {
-    const css = buildDockCss({ ...OPTS, hostedPids: ['dup', 'dup'] })
+    const css = buildDockCss({ ...OPTS, viewTop: 'dup', viewBottom: 'dup' })
     // One rule block (line-anchored) plus its single `.sdock-dragging` companion.
     expect(css.split('\n.sdock-slot #dup_lsp_main {').length - 1).toBe(1)
     expect(css.split('.sdock-dragging .sdock-slot #dup_lsp_main {').length - 1).toBe(1)
   })
 
   it('emits no hosted-view rules when both slots are empty', () => {
-    const css = buildDockCss({ ...OPTS, hostedPids: [] })
+    const css = buildDockCss({ ...OPTS, viewTop: NO_VIEW, viewBottom: NO_VIEW })
     expect(css).not.toContain('_lsp_main')
     expect(css).toContain('.sdock-placeholder')
   })
 
   it('escapes characters that are not valid in a CSS identifier', () => {
-    const css = buildDockCss({ ...OPTS, hostedPids: ['odd.id'] })
+    const css = buildDockCss({ ...OPTS, viewTop: 'odd.id' })
     expect(css).toContain('#odd\\.id_lsp_main')
   })
 
   it('escapes a leading digit with the CSS hex form, not a backslash', () => {
     // `#2do…` is an invalid selector and would silently drop the whole override block.
-    const css = buildDockCss({ ...OPTS, hostedPids: ['2do-plugin'] })
+    const css = buildDockCss({ ...OPTS, viewTop: '2do-plugin' })
     expect(css).toContain('#\\32 do-plugin_lsp_main')
     expect(css).not.toContain('#2do-plugin_lsp_main')
   })
@@ -106,10 +160,17 @@ describe('buildDockCss', () => {
   it('disables pointer events on docked views while a drag is in flight', () => {
     const css = buildDockCss(OPTS)
     expect(css).toContain('.sdock-dragging .sdock-slot iframe')
-    for (const pid of OPTS.hostedPids) {
+    for (const pid of HOSTED_PIDS) {
       expect(css).toContain(`.sdock-dragging .sdock-slot #${pid}_lsp_main`)
     }
     expect(css).toContain('pointer-events: none !important')
+  })
+
+  it('styles the diagnostic overlay above the adopted view, and its action button', () => {
+    const css = buildDockCss(OPTS)
+    expect(css).toContain('.sdock-overlay {')
+    expect(css).toContain('z-index: 2')
+    expect(css).toContain('.sdock-action {')
   })
 })
 
@@ -153,5 +214,48 @@ describe('buildDockCss — views mode', () => {
   it('keeps the slot rules so hidden views stay mounted, never unmounted', () => {
     expect(css).toContain(".sdock-slot[data-slot='top']")
     expect(css).toContain(".sdock-slot[data-slot='bottom']")
+  })
+})
+
+describe('buildDockCss — slot layouts', () => {
+  it('both configured: two slots split by the divider, nothing hidden', () => {
+    const css = buildDockCss(VIEWS)
+    expect(css).not.toContain(HIDE_MARKER)
+    expect(css).toContain(`flex: 0 0 calc(${splitVarFallback(VIEWS.splitPct)} * 1%)`)
+    expect(css).toContain(".sdock-slot[data-slot='bottom'] {\n  flex: 1 1 auto;\n}")
+  })
+
+  it('top only: the top slot takes the dock, the bottom slot and the divider are hidden', () => {
+    const css = buildDockCss({ ...VIEWS, viewBottom: NO_VIEW })
+    expect(css).toContain(".sdock-slot[data-slot='top'] {\n  flex: 1 1 auto;\n}")
+    expect(css).toContain(HIDE_MARKER)
+    expect(hideBlock(css)).toContain("[data-slot='bottom']")
+    expect(hideBlock(css)).not.toContain("[data-slot='top']")
+  })
+
+  it('bottom only: the bottom slot takes the dock, the top slot and the divider are hidden', () => {
+    const css = buildDockCss({ ...VIEWS, viewTop: NO_VIEW })
+    expect(css).toContain(".sdock-slot[data-slot='bottom'] {\n  flex: 1 1 auto;\n}")
+    expect(css).toContain(HIDE_MARKER)
+    expect(hideBlock(css)).toContain("[data-slot='top']")
+    expect(hideBlock(css)).not.toContain("[data-slot='bottom']")
+  })
+
+  it('neither configured: exactly one slot remains, carrying the placeholder', () => {
+    const css = buildDockCss({ ...VIEWS, viewTop: NO_VIEW, viewBottom: NO_VIEW })
+    expect(css).toContain(".sdock-slot[data-slot='top'] {\n  flex: 1 1 auto;\n}")
+    expect(css).toContain(HIDE_MARKER)
+    expect(hideBlock(css)).toContain("[data-slot='bottom']")
+    expect(css).toContain('.sdock-placeholder')
+  })
+
+  it('keeps splitPct in the sheet in every layout, so it is ignored but never lost', () => {
+    for (const views of [
+      { viewTop: 'a', viewBottom: NO_VIEW },
+      { viewTop: NO_VIEW, viewBottom: 'b' },
+      { viewTop: NO_VIEW, viewBottom: NO_VIEW },
+    ]) {
+      expect(buildDockCss({ ...VIEWS, ...views })).toContain(splitVarFallback(VIEWS.splitPct))
+    }
   })
 })

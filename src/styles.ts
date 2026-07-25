@@ -7,17 +7,59 @@
  * by re-providing this sheet, so nothing ever unmounts (a hidden docked iframe keeps running).
  */
 
-import { type DockMode } from './settings'
+import { type DockMode, NO_VIEW } from './settings'
 
 export interface DockCssOptions {
   /** Our plugin id — the injected container is `#<pluginId>--dock`. */
   pluginId: string
   /** Which face of the sidebar the segmented control has selected. */
   mode: DockMode
-  /** Share (%) of the dock height given to the top slot. */
+  /** Share (%) of the dock height given to the top slot when both slots are configured. */
   splitPct: number
-  /** Plugin ids whose `#<pid>_lsp_main` container we adopt into a slot. */
-  hostedPids: string[]
+  /** Plugin id selected for the top slot, or {@link NO_VIEW}. */
+  viewTop: string
+  /** Plugin id selected for the bottom slot, or {@link NO_VIEW}. */
+  viewBottom: string
+}
+
+/** Which slots are actually shown, derived from the selection alone. */
+export type SlotLayout = 'both' | 'top-only' | 'bottom-only' | 'empty'
+
+/**
+ * One configured view gets the whole dock and the divider disappears; nothing configured shows a
+ * single slot carrying the placeholder. `splitPct` is only *ignored* in those layouts — never reset —
+ * so the previous ratio comes back the moment both slots are configured again.
+ */
+export function resolveLayout(viewTop: string, viewBottom: string): SlotLayout {
+  const hasTop = viewTop !== NO_VIEW
+  const hasBottom = viewBottom !== NO_VIEW
+  if (hasTop && hasBottom) return 'both'
+  if (hasTop) return 'top-only'
+  if (hasBottom) return 'bottom-only'
+  return 'empty'
+}
+
+/**
+ * Overrides layered on top of the two-slot defaults. The divider is `display: none` in every
+ * single-slot layout, which also makes the drag machinery inert — a hidden element is never hit-tested,
+ * so `pointerdown` simply never fires.
+ */
+function layoutRules(layout: SlotLayout): string {
+  if (layout === 'both') return '/* both slots configured: the divider splits them by --sdock-split. */'
+
+  // `empty` shows exactly one slot so the "no view selected" placeholder has somewhere to live.
+  const hidden = layout === 'bottom-only' ? 'top' : 'bottom'
+  const full = layout === 'bottom-only' ? 'bottom' : 'top'
+
+  return `/* ${layout}: one slot owns the dock, the other slot and the divider step out. */
+.sdock-slot[data-slot='${full}'] {
+  flex: 1 1 auto;
+}
+
+.sdock-slot[data-slot='${hidden}'],
+.sdock-divider {
+  display: none;
+}`
 }
 
 /**
@@ -64,6 +106,17 @@ ${sel} {
   pointer-events: auto !important;
 }
 
+/* The adopted container's own iframe: inside an inline wrapper it otherwise falls back to ~300px.
+   Scoped to the adopted container on purpose — geometry inside a provider's [data-embed-owner]
+   subtree is the provider's business (protocol host rule 6). */
+${sel} iframe {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  border: 0;
+}
+
 /* Drag passthrough: an outside-started drag must not be swallowed by the docked iframe. */
 .sdock-dragging ${sel} {
   pointer-events: none !important;
@@ -102,7 +155,9 @@ ${dockId} {
 /** The complete stylesheet for the keyed `provideStyle` sheet. */
 export function buildDockCss(opts: DockCssOptions): string {
   const dockId = `#${escapeIdent(opts.pluginId)}--dock`
-  const hosted = [...new Set(opts.hostedPids)].map(hostedViewRules).join('\n')
+  const pids = [opts.viewTop, opts.viewBottom].filter((pid) => pid !== NO_VIEW)
+  const hosted = [...new Set(pids)].map(hostedViewRules).join('\n')
+  const layout = resolveLayout(opts.viewTop, opts.viewBottom)
 
   return `/* logseq-sidebar-dock — generated, do not edit by hand */
 
@@ -189,17 +244,10 @@ ${modeRules(dockId, opts.mode)}
   flex: 1 1 auto;
 }
 
-/* Any iframe parked in a slot: an iframe inside an inline wrapper otherwise falls back to ~300px. */
-.sdock-slot iframe {
-  position: absolute;
-  inset: 0;
-  width: 100% !important;
-  height: 100% !important;
-  border: 0;
-}
-
 /* Set while a drag started outside the docked views is in flight (our divider, the host's resizer,
-   anything else): the iframes must not eat the pointer stream mid-drag. */
+   anything else): the iframes must not eat the pointer stream mid-drag. This one deliberately reaches
+   into provider subtrees too — a transient pointer-events suspension is the only way the host's own
+   divider can work next to any iframe, and it changes nothing about how the view renders. */
 .sdock-dragging .sdock-slot iframe {
   pointer-events: none !important;
 }
@@ -218,18 +266,50 @@ ${modeRules(dockId, opts.mode)}
   background: var(--ls-active-primary-color, var(--ls-link-text-color, #5b8ff9));
 }
 
-.sdock-placeholder {
+${layoutRules(layout)}
+
+.sdock-placeholder,
+.sdock-overlay {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   height: 100%;
   padding: 0 12px;
   text-align: center;
   font-size: 11px;
   line-height: 1.4;
-  opacity: 0.6;
   color: var(--ls-secondary-text-color, var(--ls-primary-text-color, inherit));
   user-select: none;
+}
+
+.sdock-placeholder {
+  opacity: 0.6;
+}
+
+/* Diagnosis laid OVER an adopted view: undocking it to say this would only reload it again. */
+.sdock-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: var(--ls-secondary-background-color, rgba(127, 127, 127, 0.12));
+  opacity: 0.95;
+}
+
+.sdock-action {
+  padding: 3px 10px;
+  border: 0;
+  border-radius: calc(var(--ls-border-radius-medium, 8px) - 2px);
+  background: var(--ls-tertiary-background-color, rgba(127, 127, 127, 0.18));
+  color: var(--ls-primary-text-color, inherit);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.sdock-action:hover {
+  background: var(--ls-quaternary-background-color, rgba(127, 127, 127, 0.28));
 }
 ${hosted}
 `

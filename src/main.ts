@@ -2,7 +2,7 @@
 
 import '@logseq/libs'
 
-import { Dock } from './dock'
+import { Dock, reclaimModel } from './dock'
 import { getInstalledPluginIds } from './logseq-types'
 import {
   DOCK_MODES,
@@ -94,6 +94,14 @@ function main(): void {
     },
     sdockShowViews: () => {
       setMode('views')
+    },
+    // Explicit user intent to take an evicted embed back — the only re-mount the protocol allows
+    // after a provider moved the view to another surface.
+    [reclaimModel('top')]: () => {
+      dock.reclaim('top')
+    },
+    [reclaimModel('bottom')]: () => {
+      dock.reclaim('bottom')
     },
   })
 

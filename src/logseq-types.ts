@@ -13,7 +13,11 @@
  *   own constructors is meaningless — this module duck-types instead.
  */
 
-import '@logseq/libs'
+/**
+ * Note: no `import '@logseq/libs'` here on purpose. The package's global `Window` augmentation is in
+ * the program because `dock.ts` and `main.ts` import it, and leaving the side-effect import out keeps
+ * this module loadable outside a browser — which is what makes {@link extractPluginId} unit-testable.
+ */
 
 /** Teardown callback parked on the host document so it survives our plugin's module scope. */
 export type HostCleanup = () => void
@@ -27,8 +31,8 @@ interface HostDocumentWithCleanup extends Document {
  * The SDK types its event union without the names we need, so we duck-type our own narrow view.
  */
 interface EmitterLike {
-  on: (event: string, handler: () => void) => unknown
-  off: (event: string, handler: () => void) => unknown
+  on: (event: string, handler: (...args: unknown[]) => void) => unknown
+  off: (event: string, handler: (...args: unknown[]) => void) => unknown
 }
 
 /**
@@ -44,6 +48,29 @@ const PLUGIN_LIFECYCLE_EVENTS = [
   'enabled',
   'disabled',
 ] as const
+
+/**
+ * Which plugin a registry event is about.
+ *
+ * Verified against the host bundle (`resources/js/lsplugin.core.js`) — the argument is either the
+ * `PluginLocal` itself or the bare id string, depending on the event:
+ * `registered` → `emit("registered", pluginLocal)`, `reloaded` → `emit("reloaded", this)`,
+ * `unregistered` / `enabled` / `disabled` / `unlink-plugin` → `emit(..., id)`.
+ *
+ * Returns `null` when the shape is something we do not recognise, and callers must treat that as
+ * "affects no specific plugin" rather than "affects all of them".
+ */
+export function extractPluginId(args: readonly unknown[]): string | null {
+  for (const arg of args) {
+    if (typeof arg === 'string') {
+      if (arg.trim() !== '') return arg
+      continue
+    }
+    if (typeof arg !== 'object' || arg === null) continue
+    if ('id' in arg && typeof arg.id === 'string' && arg.id.trim() !== '') return arg.id
+  }
+  return null
+}
 
 /** Duck-typed `Map` check (a cross-realm `instanceof Map` would always be false). */
 function isMapLike(value: unknown): boolean {
@@ -107,16 +134,23 @@ export function setHostCleanup(doc: Document, cleanup: HostCleanup): void {
 
 /**
  * Subscribe to the host plugin-registry lifecycle (install/reload/enable/disable of ANY plugin).
+ * The handler receives the id of the plugin the event is about, or `null` if it cannot be read.
  * Returns an unsubscribe function, or `null` when the registry is not reachable.
  */
-export function subscribeHostPluginLifecycle(handler: () => void): HostCleanup | null {
+export function subscribeHostPluginLifecycle(
+  handler: (pid: string | null) => void,
+): HostCleanup | null {
   const host = getHostWindow()
   if (host === null) return null
   const emitter = asEmitter(host.LSPluginCore)
   if (emitter === null) return null
-  for (const event of PLUGIN_LIFECYCLE_EVENTS) emitter.on(event, handler)
+
+  const listener = (...args: unknown[]): void => {
+    handler(extractPluginId(args))
+  }
+  for (const event of PLUGIN_LIFECYCLE_EVENTS) emitter.on(event, listener)
   return () => {
-    for (const event of PLUGIN_LIFECYCLE_EVENTS) emitter.off(event, handler)
+    for (const event of PLUGIN_LIFECYCLE_EVENTS) emitter.off(event, listener)
   }
 }
 
